@@ -5823,12 +5823,12 @@ static void inet6_ifa_notify(int event, struct inet6_ifaddr *ifa)
 	if (!skb)
 		goto errout;
 #if IS_ENABLED(CONFIG_PAC_MTE_COMPART_IPV6)
-    skb = hakc_transfer_to_clique(skb, sizeof(*skb), __claque_id, __color,
+/*    skb = hakc_transfer_to_clique(skb, sizeof(*skb), __claque_id, __color,
                                   false);
 	skb->data = skb->head = hakc_transfer_to_clique(skb->data,
 						       skb->truesize - SKB_DATA_ALIGN(sizeof(struct sk_buff)),
 						       __claque_id,
-						       __color, false);
+						       __color, false);*/
 #endif
 
 	err = inet6_fill_ifaddr(skb, ifa, &fillargs);

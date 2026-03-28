@@ -122,6 +122,27 @@ int sk_filter_trim_cap(struct sock *sk, struct sk_buff *skb, unsigned int cap)
 	int err;
 	struct sk_filter *filter;
 
+	sk = hakc_safe_ptr(sk);
+	skb = hakc_safe_ptr(skb);
+
+	if (skb) {
+		unsigned int off = 0;
+		void *safe_head;
+
+		if (skb->head && skb->data)
+			off = skb->data - skb->head;
+
+		safe_head = hakc_safe_ptr(skb->head);
+		skb->head = safe_head;
+		skb->data = safe_head ? safe_head + off : hakc_safe_ptr(skb->data);
+		skb->sk = hakc_safe_ptr(skb->sk);
+	}
+
+	if (sk) {
+		sk->sk_filter = hakc_safe_ptr(sk->sk_filter);
+		if (sk->sk_filter)
+			sk->sk_filter->prog = hakc_safe_ptr(sk->sk_filter->prog);
+	}
 	/*
 	 * If the skb was allocated from pfmemalloc reserves, only
 	 * allow SOCK_MEMALLOC sockets to use it as this socket is
@@ -146,7 +167,7 @@ int sk_filter_trim_cap(struct sock *sk, struct sk_buff *skb, unsigned int cap)
 		unsigned int pkt_len;
 
 		skb->sk = sk;
-		pkt_len = bpf_prog_run_save_cb(filter->prog, skb);
+		pkt_len = bpf_prog_run_save_cb(hakc_safe_ptr(filter->prog), skb);
 		skb->sk = save_sk;
 		err = pkt_len ? pskb_trim(skb, max(cap, pkt_len)) : -EPERM;
 	}

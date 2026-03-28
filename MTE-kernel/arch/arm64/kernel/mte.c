@@ -80,7 +80,7 @@ u8 mte_get_mem_tag(void *addr)
 	return 0;
 #else
 	if (system_supports_mte()) {
-#if IS_ENABLED(CONFIG_PAC_MTE_EVAL_CODEGEN)
+#if 0//IS_ENABLED(CONFIG_PAC_MTE_EVAL_CODEGEN)
 		asm volatile(
 			 /* NB: This assembly is from mte.S, so keep it
 			  * synced */
@@ -108,7 +108,7 @@ u8 mte_get_random_tag(void)
 
 	if (system_supports_mte()) {
 		asm volatile(ALTERNATIVE("add %0, %0, %0",
-#if IS_ENABLED(CONFIG_PAC_MTE_EVAL_CODEGEN)
+#if 0//IS_ENABLED(CONFIG_PAC_MTE_EVAL_CODEGEN)
 					 "add %0, %0, %0",
 #else
 					 __MTE_PREAMBLE "irg %0, %0",
@@ -134,7 +134,7 @@ void *mte_set_mem_tag_range(void *addr, size_t size, u8 tag)
 	/* Make sure that size is aligned. */
 	WARN_ON(size & (MTE_GRANULE_SIZE - 1));
 
-	#if IS_ENABLED(CONFIG_PAC_MTE_EVAL_CODEGEN)
+	#if 0//IS_ENABLED(CONFIG_PAC_MTE_EVAL_CODEGEN)
 	ptr = HAKC_GET_SAFE_PTR(ptr);
 	#else
 	tag = 0xF0 | (tag & 0xF);
@@ -147,7 +147,7 @@ void *mte_set_mem_tag_range(void *addr, size_t size, u8 tag)
 
 void mte_init_tags(u64 max_tag)
 {
-#if !IS_ENABLED(CONFIG_PAC_MTE_EVAL_CODEGEN)
+#if 1//!IS_ENABLED(CONFIG_PAC_MTE_EVAL_CODEGEN)
 	static bool gcr_kernel_excl_initialized;
 
 	if (!gcr_kernel_excl_initialized) {
@@ -170,7 +170,7 @@ void mte_init_tags(u64 max_tag)
 static void update_sctlr_el1_tcf0(u64 tcf0)
 {
 	/* ISB required for the kernel uaccess routines */
-#if !IS_ENABLED(CONFIG_PAC_MTE_EVAL_CODEGEN)
+#if 1//!IS_ENABLED(CONFIG_PAC_MTE_EVAL_CODEGEN)
 	sysreg_clear_set(sctlr_el1, SCTLR_EL1_TCF0_MASK, tcf0);
 	isb();
 #endif
@@ -197,7 +197,7 @@ static void update_gcr_el1_excl(u64 incl)
 	 * No need for ISB since this only affects EL0 currently, implicit
 	 * with ERET.
 	 */
-#if !IS_ENABLED(CONFIG_PAC_MTE_EVAL_CODEGEN)
+#if 1//!IS_ENABLED(CONFIG_PAC_MTE_EVAL_CODEGEN)
 	u64 excl = ~incl & SYS_GCR_EL1_EXCL_MASK;
 	sysreg_clear_set_s(SYS_GCR_EL1, SYS_GCR_EL1_EXCL_MASK, excl);
 #endif
@@ -215,7 +215,7 @@ void flush_mte_state(void)
 		return;
 
 	/* clear any pending asynchronous tag fault */
-#if !IS_ENABLED(CONFIG_PAC_MTE_EVAL_CODEGEN)
+#if 1//!IS_ENABLED(CONFIG_PAC_MTE_EVAL_CODEGEN)
 	dsb(ish);
 	write_sysreg_s(0, SYS_TFSRE0_EL1);
 #endif

@@ -332,48 +332,83 @@ static bool ndisc_key_eq(const struct neighbour *n, const void *pkey)
 
 static int ndisc_constructor(struct neighbour *neigh)
 {
-	struct in6_addr *addr = (struct in6_addr *)&neigh->primary_key;
-	struct net_device *dev = neigh->dev;
+	struct in6_addr addr_copy;
+	struct net_device *dev;
 	struct inet6_dev *in6_dev;
 	struct neigh_parms *parms;
-	bool is_multicast = ipv6_addr_is_multicast(addr);
+	const struct header_ops *hop;
+	const struct neigh_ops *ops;
+	unsigned int flags;
+	unsigned char addr_len;
+	const unsigned char *dev_addr = NULL;
+	const unsigned char *broadcast = NULL;
+	bool is_multicast;
+
+	neigh = (struct neighbour *)hakc_safe_ptr(neigh);
+	if (!neigh)
+		return -EINVAL;
+
+	dev = (struct net_device *)hakc_safe_ptr(neigh->dev);
+	if (!dev)
+		return -EINVAL;
+
+	memcpy(&addr_copy, &neigh->primary_key, sizeof(addr_copy));
+	is_multicast = ipv6_addr_is_multicast(&addr_copy);
+
+	flags = dev->flags;
+	addr_len = dev->addr_len;
+	hop = (const struct header_ops *)hakc_safe_ptr(dev->header_ops);
+	dev_addr = (const unsigned char *)hakc_safe_ptr(dev->dev_addr);
+	broadcast = (const unsigned char *)hakc_safe_ptr(dev->broadcast);
 
 	in6_dev = in6_dev_get(dev);
-	if (!in6_dev) {
+	in6_dev = (struct inet6_dev *)hakc_safe_ptr(in6_dev);
+	if (!in6_dev)
+		return -EINVAL;
+
+	parms = (struct neigh_parms *)hakc_safe_ptr(in6_dev->nd_parms);
+	if (!parms) {
+		in6_dev_put(in6_dev);
 		return -EINVAL;
 	}
 
-	parms = in6_dev->nd_parms;
-	__neigh_parms_put(neigh->parms);
+	if (neigh->parms)
+		__neigh_parms_put((struct neigh_parms *)hakc_safe_ptr(neigh->parms));
 	neigh->parms = neigh_parms_clone(parms);
 
 	neigh->type = is_multicast ? RTN_MULTICAST : RTN_UNICAST;
-	if (!dev->header_ops) {
+
+	if (!hop) {
 		neigh->nud_state = NUD_NOARP;
-		neigh->ops = &ndisc_direct_ops;
+		ops = &ndisc_direct_ops;
 		neigh->output = neigh_direct_output;
+		neigh->ops = ops;
 	} else {
 		if (is_multicast) {
 			neigh->nud_state = NUD_NOARP;
-			ndisc_mc_map(addr, neigh->ha, dev, 1);
-		} else if (dev->flags&(IFF_NOARP|IFF_LOOPBACK)) {
+			ndisc_mc_map(&addr_copy, neigh->ha, dev, 1);
+		} else if (flags & (IFF_NOARP | IFF_LOOPBACK)) {
 			neigh->nud_state = NUD_NOARP;
-			memcpy(neigh->ha, dev->dev_addr, dev->addr_len);
-			if (dev->flags&IFF_LOOPBACK)
+			if (dev_addr)
+				memcpy(neigh->ha, dev_addr, addr_len);
+			if (flags & IFF_LOOPBACK)
 				neigh->type = RTN_LOCAL;
-		} else if (dev->flags&IFF_POINTOPOINT) {
+		} else if (flags & IFF_POINTOPOINT) {
 			neigh->nud_state = NUD_NOARP;
-			memcpy(neigh->ha, dev->broadcast, dev->addr_len);
+			if (broadcast)
+				memcpy(neigh->ha, broadcast, addr_len);
 		}
-		if (dev->header_ops->cache)
-			neigh->ops = &ndisc_hh_ops;
+
+		ops = hop->cache ? &ndisc_hh_ops : &ndisc_generic_ops;
+
+		if (neigh->nud_state & NUD_VALID)
+			neigh->output = ops->connected_output;
 		else
-			neigh->ops = &ndisc_generic_ops;
-		if (neigh->nud_state&NUD_VALID)
-			neigh->output = neigh->ops->connected_output;
-		else
-			neigh->output = neigh->ops->output;
+			neigh->output = ops->output;
+
+		neigh->ops = ops;
 	}
+
 	in6_dev_put(in6_dev);
 	return 0;
 }

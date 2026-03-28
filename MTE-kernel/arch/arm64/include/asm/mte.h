@@ -45,7 +45,7 @@ long get_mte_ctrl(struct task_struct *task);
 int mte_ptrace_copy_tags(struct task_struct *child, long request,
 			 unsigned long addr, unsigned long data);
 
-#define MTE_DISABLED (__is_defined(CONFIG_PAC_MTE_EVAL_CODEGEN) && \
+#define MTE_DISABLED 0//(__is_defined(CONFIG_PAC_MTE_EVAL_CODEGEN) && \
 			!IS_ENABLED(CONFIG_PAC_MTE_EVAL_ENABLE_MTE))
 
 static inline void mte_assign_mem_tag_range(void *addr, size_t size)
@@ -67,7 +67,7 @@ static inline void mte_assign_mem_tag_range(void *addr, size_t size)
 		 * 'asm volatile' is required to prevent the compiler to move
 		 * the statement outside of the loop.
 		 */
-		#if IS_ENABLED(CONFIG_PAC_MTE_EVAL_CODEGEN)
+		#if 0//IS_ENABLED(CONFIG_PAC_MTE_EVAL_CODEGEN)
 		#if !IS_ENABLED(CONFIG_PAC_MTE_MTE_MEMORY_BARRIER)
 		asm volatile(__MTE_PREAMBLE
 			     "ldr x16, =tag_clobber_memory\n\t"

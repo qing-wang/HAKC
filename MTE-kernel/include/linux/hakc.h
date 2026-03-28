@@ -18,7 +18,7 @@ typedef u64 clique_access_tok_t;
 #undef hakc_noinline
 #define hakc_noinline noinline
 
-#if IS_ENABLED(CONFIG_PAC_MTE_EVAL_CODEGEN) && \
+#if 0//IS_ENABLED(CONFIG_PAC_MTE_EVAL_CODEGEN) && \
 	!IS_ENABLED(PAC_MTE_MTE_MEMORY_BARRIER)
 extern int tag_clobber_memory[4];
 #endif
@@ -48,7 +48,7 @@ extern int tag_clobber_memory[4];
 
 #define _TAKE_SECOND(_ignore, x, ...) x
 
-#if IS_ENABLED(CONFIG_PAC_MTE_EVAL_CODEGEN)
+#if 0//IS_ENABLED(CONFIG_PAC_MTE_EVAL_CODEGEN)
 #define EMBED_CLAQUE_ID(CLAQUE, ADDR) 	ADDR
 #else
 #define EMBED_CLAQUE_ID(CLAQUE, ADDR)	\
@@ -176,7 +176,7 @@ static inline void *hakc_safe_ptr2(unsigned long addr)
 {
 	unsigned long tmp = addr;
 	if (!(tmp & BIT(VA_BITS - 1))) {
-		return (void*)(tmp & 0x0000FFFFFFFFFFFF);
+		return (void*)(tmp & 0x00007FFFFFFFFFFF);
 	} else {
 		return (void*)HAKC_KADDR(tmp);
 	}
@@ -201,6 +201,15 @@ const struct nlattr * const *hakc_transfer_nla(const struct nlattr * const [], s
 
 #define _HAKC_DATA_COLOR_ATTR(COLOR)                                            \
 	__attribute__((used, section(".data.hakc." #COLOR)))
+
+/* For non-const (writable) variables that need HAKC coloring. Uses a distinct
+ * section name to avoid a type conflict with the read-only const variables
+ * placed in .data.hakc.<COLOR> by HAKC_MODULE_CLAQUE/HAKC_MODULE_CLIQUE.
+ * The section name still contains ".hakc.<COLOR>" so module.c's strstr()
+ * check will color it correctly at module load time.
+ */
+#define _HAKC_RW_DATA_COLOR_ATTR(COLOR)                                         \
+	__attribute__((used, section(".rw.hakc." #COLOR)))
 
 #define HAKC_MODULE_CLIQUE(CLAQUE_ID, COLOR, ...)                               \
 	static _HAKC_DATA_COLOR_ATTR(COLOR) const claque_id_t __claque_id =     \

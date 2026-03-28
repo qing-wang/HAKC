@@ -441,7 +441,7 @@ static inline bool cpus_have_cap(unsigned int num)
  */
 static __always_inline bool __cpus_have_const_cap(int num)
 {
-#if IS_ENABLED(CONFIG_PAC_MTE_EVAL_CODEGEN)
+#if 0//IS_ENABLED(CONFIG_PAC_MTE_EVAL_CODEGEN)
         if(num == ARM64_MTE) return true;
 #endif
 	if (num >= ARM64_NCAPS)

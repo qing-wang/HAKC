@@ -83,7 +83,11 @@ MODULE_LICENSE("GPL");
 /* The inetsw6 table contains everything that inet6_create needs to
  * build a new socket.
  */
+#if IS_ENABLED(CONFIG_PAC_MTE_COMPART_IPV6)
+static struct list_head inetsw6[SOCK_MAX] _HAKC_RW_DATA_COLOR_ATTR(RED_CLIQUE);
+#else
 static struct list_head inetsw6[SOCK_MAX];
+#endif
 static DEFINE_SPINLOCK(inetsw6_lock);
 
 struct ipv6_params ipv6_defaults = {
@@ -481,7 +485,7 @@ int inet6_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 }
 EXPORT_SYMBOL(inet6_bind);
 
-int inet6_release(struct socket *sock)
+noinline int inet6_release(struct socket *sock)
 {
 	struct sock *sk = sock->sk;
 

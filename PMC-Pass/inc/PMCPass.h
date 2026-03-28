@@ -9,6 +9,7 @@
 #ifndef PMC_PMCPASS_H
 #define PMC_PMCPASS_H
 
+#include <map>
 #include <set>
 #include <vector>
 

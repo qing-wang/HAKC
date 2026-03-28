@@ -4,6 +4,9 @@
  */
 
 #include "PMCPass.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Path.h"
+#include "llvm/Support/raw_ostream.h"
 
 using namespace llvm;
 
@@ -14,13 +17,43 @@ namespace {
      * are not recolored, and the authenticated pointer is passed when invoked.
      */
     const std::set<StringRef> safe_transition_functions = {
+	    "kmem_cache_free",
+	    "__sk_destruct",
+	    "sk_prot_alloc",
+	    "sk_alloc",
+	    "slab_pre_alloc_hook",
+
+            "sock_zerocopy_realloc",
+            "__skb_queue_tail",
+            "sock_wfree",
+            "dst_init",
+            "rb_erase",
+            "skb_dst",
+            "dev_net",
+            "napi_consume_skb",
+            "net_rx_action",
+            "_kfree_skb_defer",
+            "__kfree_skb_flush",
+            "kmem_cache_free_bulk",
+            "unix_stream_connect",
+            "path_get",
+            "rb_first",
+            "put_cmsg",
+            "__siphash_aligned",
+            "csum_ipv6_magic",
+            "_copy_from_iter_full",
+            "sk_fullsock",
+            "mem_cgroup_sk_free",
+            "memcg_slab_free_hook",
+            "skb_copy_and_csum_bits",
+            "__arch_copy_from_user",
             "mod_delayed_work",
             "kasan_check_write",
             "arch_static_branch_jump",
             "arch_static_branch",
-            //            "static_branch_TTWU_QUEUE",
-            //            "static_branch_WARN_DOUBLE_CLOCK",
-            //            "static_branch_HRTICK",
+            "static_branch_TTWU_QUEUE",
+            "static_branch_WARN_DOUBLE_CLOCK",
+            "static_branch_HRTICK",
             "kmalloc",
             "bitmap_set",
             "__clear_bit",
@@ -37,69 +70,69 @@ namespace {
             "register_net_sysctl",
             "__nlmsg_put",
             "rhashtable_init",
-            //            "nla_put",
-            //            "sock_init_data",
-            //            "rtnl_notify",
+            "nla_put",
+            "sock_init_data",
+            "rtnl_notify",
             "neigh_parms_alloc",
             "__preempt_count_add",
-            //            "nla_data",
+            "nla_data",
             "proc_create_single_data",
             "write_lock_bh",
             "_raw_write_lock_bh",
             "write_unlock_bh",
             "_raw_write_unlock_bh",
-            //            "neigh_sysctl_register",
+            "neigh_sysctl_register",
             "snprintf",
-            //            "dev_get_by_index",
-            //            "fib_nh_common_init",
+            "dev_get_by_index",
+            "fib_nh_common_init",
             "_raw_spin_lock_bh",
             "_raw_spin_unlock_bh",
             "spin_lock_bh",
             "spin_unlock_bh",
-            //            "call_fib_notifiers",
-            //            "fib_nexthop_info",
-            //            "dev_get_flags",
+            "call_fib_notifiers",
+            "fib_nexthop_info",
+            "dev_get_flags",
             "strlen",
             "strchr",
-            //            "dev_get_iflink",
-            //            "dev_mc_add",
-            //            "sock_alloc_send_skb",
-            //            "dst_alloc",
-            //            "sk_mc_loop",
-            //            "__neigh_create",
-            //            "fqdir_init",
-            //            "neigh_resolve_output",
-            //            "skb_set_owner_w",
-            //            "dev_queue_xmit",
-            //            "__skb_checksum_complete",
-            //            "neigh_update",
-            //            "kfree_skb",
-            //            "call_rcu",
+            "dev_get_iflink",
+            "dev_mc_add",
+            "sock_alloc_send_skb",
+            "dst_alloc",
+            "sk_mc_loop",
+            "__neigh_create",
+            "fqdir_init",
+            "neigh_resolve_output",
+            "skb_set_owner_w",
+            "dev_queue_xmit",
+            "__skb_checksum_complete",
+            "neigh_update",
+            "kfree_skb",
+            "call_rcu",
             "proc_dointvec",
-            //            "sk_alloc",
-            //            "udp_lib_get_port",
-            //            "tcp_init_sock",
-            //            "udp_cmsg_send",
-            //            "dev_mc_del",
-            //            "sk_dst_check",
-            //            "udp_lib_rehash",
-            //            "sk_setup_caps",
-            //            "skb_clone",
-            //            "sk_filter_trim_cap",
-            //            "skb_dst_copy",
-            //            "skb_pull_rcsum",
-            //            "__udp_enqueue_schedule_skb",
-            //            "__skb_recv_udp",
+            "sk_alloc",
+            "udp_lib_get_port",
+            "tcp_init_sock",
+            "udp_cmsg_send",
+            "dev_mc_del",
+            "sk_dst_check",
+            "udp_lib_rehash",
+            "sk_setup_caps",
+            "skb_clone",
+            "sk_filter_trim_cap",
+            "skb_dst_copy",
+            "skb_pull_rcsum",
+            "__udp_enqueue_schedule_skb",
+            "__skb_recv_udp",
             "_copy_to_iter",
-            //            "put_cmsg",
-            //            "skb_consume_udp",
+            "put_cmsg",
+            "skb_consume_udp",
             "atomic_notifier_chain_register",
             "instrument_atomic_write",
-            //            "hlist_add_head_rcu",
+            "hlist_add_head_rcu",
             "spin_lock",
             "spin_unlock",
             "list_add_rcuhlist_empty",
-            //            "dev_add_offload",
+            "dev_add_offload",
             "kmemdup",
             "rtnl_register_module",
             "rtnl_af_register",
@@ -109,16 +142,16 @@ namespace {
             "get_random_bytes",
             "proto_register",
             "proto_unregister",
-            //            "__list_add_valid",
-            //            "sock_register",
+            "__list_add_valid",
+            "sock_register",
             "register_pernet_subsys",
             "unregister_pernet_subsys",
             "find_next_bit",
             "cpumask_next",
             "proc_create_net_data",
             "mod_delayed_work_on",
-            //            "neigh_table_init",
-            //            "fib_notifier_ops_register",
+            "neigh_table_init",
+            "fib_notifier_ops_register",
             "register_netdevice_notifier",
             "unregister_netdevice_notifier",
             "proc_create_net_single",
@@ -127,8 +160,8 @@ namespace {
             "kmem_cache_create",
             "alloc_workqueue",
             "__warn_printk",
-            //            "dev_hold",
-            //            "genl_register_family",
+            "dev_hold",
+            "genl_register_family",
             "system_uses_lse_atomics",
             "__do_once_done",
             "__do_once_start",
@@ -143,14 +176,14 @@ namespace {
             "__percpu_add_case_32",
             "test_bit",
             "cancel_delayed_work",
-            //            "inet_frags_init",
-            //            "sock_prot_inuse_add",
-            //            "dev_add_pack",
-            //            "net_generic",
+            "inet_frags_init",
+            "sock_prot_inuse_add",
+            "dev_add_pack",
+            "net_generic",
             "neigh_parms_release",
             "preempt_count",
-            //            "write_pnet",
-            //            "read_pnet",
+            "write_pnet",
+            "read_pnet",
             "rhltable_init",
             "queued_spin_lock_slowpath",
             "crypto_alloc_shash",
@@ -185,27 +218,27 @@ namespace {
      * @brief The set of files to run our analysis on
      */
     const std::set<StringRef> source_files_to_instrument = {
-            "../net/",
-            "../fs/proc/proc_sysctl.c",
-            "../lib/list_debug.c",
-            "../lib/nlattr.c",
-            "../lib/rhashtable.c",
-            "../lib/string.c",
-            "../lib/kobject_uevent.c",
-            "../fs/proc/generic.c",
-            "../kernel/",
-            "../security/commoncap.c",
-            "../drivers/net",
-            "../lib/percpu_counter.c",
-            "../lib/vsprintf.c",
+            "net/",
+            "fs/proc/proc_sysctl.c",
+            "lib/list_debug.c",
+            "lib/nlattr.c",
+            "lib/rhashtable.c",
+            "lib/string.c",
+            "lib/kobject_uevent.c",
+            "fs/proc/generic.c",
+            "kernel/",
+            "security/commoncap.c",
+            "drivers/net",
+            "lib/percpu_counter.c",
+            "lib/vsprintf.c",
     };
 
     /**
      * @brief The set of files to NOT run our analysis on
      */
     const std::set<StringRef> source_files_to_skip = {
-            "../lib/idr.c",
-            "../lib/xarray.c",
+            "lib/idr.c",
+            "lib/xarray.c",
     };
 
     /**
@@ -470,8 +503,11 @@ namespace {
                 if (call->getCalledFunction() &&
                     call->getCalledFunction()->getName() ==
                     data_check_name) {
-                    working_list.insert(call->getArgOperand(
-                            call->getNumArgOperands() - 1));
+                    //working_list.insert(call->getArgOperand(call->getNumArgOperands() - 1));
+			unsigned n = call->arg_size();
+			if (n > 0) {
+			    working_list.insert(call->getArgOperand(n - 1));
+			}
                     continue;
                 }
             } else if (GEPOperator *gep = dyn_cast<GEPOperator>(curr)) {
@@ -1376,10 +1412,12 @@ namespace {
             /* Opaque (aka forward declared) structs, so assume tag granularity */
             return irBuilder.getInt64(16);
         }
-        Value *nullVal = ConstantPointerNull::getNullValue(type);
-        Value *idxVal = ConstantInt::get(irBuilder.getInt32Ty(), 1);
-        Value *size = irBuilder.CreateGEP(nullVal, idxVal);
-        return irBuilder.CreatePtrToInt(size, irBuilder.getInt64Ty());
+	auto *ptrTy   = PointerType::getUnqual(type);
+	Value *nullVal = ConstantPointerNull::get(ptrTy);
+
+	Value *idxVal  = irBuilder.getInt32(1);
+	Value *sizePtr = irBuilder.CreateGEP(type, nullVal, idxVal); //ok
+	return irBuilder.CreatePtrToInt(sizePtr, irBuilder.getInt64Ty());
     }
 
     Value *
@@ -1612,7 +1650,8 @@ namespace {
                 exitTokens->getType()->getPointerElementType()) &&
                "exit tokens are not an array type");
 
-        Value *gep = irBuilder.CreateGEP(exitTokens, {irBuilder.getInt64(0),
+	Type *eltTy = exitTokens->getValueType(); //ok
+        Value *gep = irBuilder.CreateGEP(eltTy, exitTokens, {irBuilder.getInt64(0),
                                                       irBuilder.getInt64(
                                                               0)});
         Type *auth_check_types[] = {
@@ -1635,7 +1674,7 @@ namespace {
                 target_address,
                 currentAccessToken,
                 gep,
-                ConstantInt::get(auth_check_types[2],
+                ConstantInt::get(auth_check_types[3],
                                  exitTokens->getType()->getPointerElementType()->getArrayNumElements(),
                                  false)};
         Value *auth_result = irBuilder.CreateCall(auth_check, args);
@@ -1679,7 +1718,8 @@ namespace {
                     callInst->getCalledOperand(), irBuilder.getInt8PtrTy());
         }
 
-        for (unsigned i = 0; i < callInst->getNumArgOperands(); i++) {
+        //for (unsigned i = 0; i < callInst->getNumArgOperands(); i++) {
+        for (unsigned i = 0; i < callInst->arg_size(); i++) {
             Use &operand = callInst->getArgOperandUse(i);
             if (!argShouldTransfer(operand)) {
                 newOperands.push_back(operand.get());
@@ -2174,10 +2214,12 @@ namespace {
                         currType->print(errs());
                         errs() << ") needs signing\n";
                     }
-                    Value *structMember = irBuilder.CreateStructGEP(value,
+                    Value *structMember = irBuilder.CreateStructGEP(structType, value,
                                                                     i);
                     //                    Value *color = saveColor(structMember);
-                    LoadInst *load = irBuilder.CreateLoad(structMember);
+                    //LoadInst *load = irBuilder.CreateLoad(structMember);
+		    Type *loadTy = structMember->getType()->getPointerElementType();
+		    LoadInst *load = irBuilder.CreateLoad(loadTy, structMember);
                     CallInst *transferCall = addSignatureWithColorCall(load);
                     result = irBuilder.CreateStore(transferCall,
                                                    structMember);
@@ -2200,7 +2242,7 @@ namespace {
                     if (initializer) {
                         structMember = initializer->getAggregateElement(i);
                     } else {
-                        structMember = irBuilder.CreateStructGEP(value, i);
+                        structMember = irBuilder.CreateStructGEP(structType, value, i);
                     }
                     assert(structMember);
                     if (debug_output) {
@@ -2424,8 +2466,8 @@ namespace {
 
             for (auto *user : it.second) {
                 if (CallInst *call = dyn_cast<CallInst>(user)) {
-                    for (unsigned idx = 0;
-                         idx < call->getNumArgOperands(); idx++) {
+                    for (unsigned idx = 0; idx < call->arg_size(); idx++) {
+                    //for (unsigned idx = 0; idx < call->getNumArgOperands(); idx++) {
                         Use &arg = call->getArgOperandUse(idx);
                         Value *def = getDef(arg.get());
                         if (def == it.first) {
@@ -3167,7 +3209,8 @@ namespace {
     void HAKCFunctionAnalysis::addStackTransfers() {
         for (auto it : stackPtrsPassedToFuncs) {
             CallInst *call = it.first;
-            for (unsigned i = 0; i < call->getNumArgOperands(); i++) {
+            //for (unsigned i = 0; i < call->getNumArgOperands(); i++) {
+            for (unsigned i = 0; i < call->arg_size(); i++) {
                 Value *arg = call->getArgOperand(i);
                 if (it.second.find(arg) != it.second.end()) {
                     irBuilder.SetInsertPoint(call);
@@ -3214,9 +3257,12 @@ namespace {
 
         Instruction *entry = getFunction().getEntryBlock().getFirstNonPHIOrDbgOrLifetime();
         irBuilder.SetInsertPoint(entry);
-        this->claqueId = irBuilder.CreateLoad(claqueId);
-        this->currentColor = irBuilder.CreateLoad(color);
-        this->currentAccessToken = irBuilder.CreateLoad(accessToken);
+        //this->claqueId = irBuilder.CreateLoad(claqueId);
+        //this->currentColor = irBuilder.CreateLoad(color);
+        //this->currentAccessToken = irBuilder.CreateLoad(accessToken);
+	this->claqueId = irBuilder.CreateLoad(claqueId->getValueType(), claqueId);
+	this->currentColor = irBuilder.CreateLoad(color->getValueType(), color);
+	this->currentAccessToken = irBuilder.CreateLoad(accessToken->getValueType(), accessToken);
 
         StringRef colorSectionName;
         if (!functionColor) {
@@ -3366,6 +3412,38 @@ namespace {
             }
         }
     }
+    static void dumpModuleIRToTmp(llvm::Module &M, llvm::StringRef Tag) {
+        const std::string dir = "/tmp/pmc-ir";
+        (void)llvm::sys::fs::create_directories(dir);
+
+        // 用 source file 名當檔名 (e.g., route.c.after.ll)
+        std::string base = llvm::sys::path::filename(M.getSourceFileName()).str();
+
+        // 如果 SourceFileName 是空的，就退回用 module identifier
+        if (base.empty()) {
+            base = llvm::sys::path::filename(M.getModuleIdentifier()).str();
+            if (base.empty()) base = "module";
+        }
+
+        // 避免奇怪字元導致路徑問題（最簡單：把 '/' 換成 '_'）
+        for (char &c : base) {
+            if (c == '/') c = '_';
+        }
+
+        const std::string path = dir + "/" + base + "." + Tag.str() + ".ll";
+
+        std::error_code EC;
+        llvm::raw_fd_ostream OS(path, EC, llvm::sys::fs::OF_Text);
+        if (EC) {
+            llvm::errs() << "PMCPass: failed to open " << path
+                        << " : " << EC.message() << "\n";
+            return;
+        }
+
+        M.print(OS, nullptr);
+        OS.flush();
+        llvm::errs() << "PMCPass: dumped module IR to " << path << "\n";
+    }
 
     struct PMCPass : public ModulePass {
         static char ID;
@@ -3373,8 +3451,12 @@ namespace {
         PMCPass() : ModulePass(ID) {}
 
         bool runOnModule(Module &M) override {
+	errs() << "PMCPass src=" << M.getSourceFileName() << "\n";
             HAKCModuleTransformation transformation(M);
             transformation.performTransformations();
+
+	    dumpModuleIRToTmp(M, "after");
+
             if (transformation.isCompartmentalized()) {
                 errs() << "Total Data Checks: "
                        << transformation.totalDataChecks << "\n"

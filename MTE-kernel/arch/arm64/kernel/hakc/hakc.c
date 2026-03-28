@@ -225,7 +225,7 @@ static void *sign_data(const void *address, pac_salt_t modifier)
 		  modifier);
 
 	asm(
-#if IS_ENABLED(CONFIG_PAC_MTE_EVAL_CODEGEN)
+#if 0//IS_ENABLED(CONFIG_PAC_MTE_EVAL_CODEGEN)
 		PAC_SUB_INSTS
 #else
 		// using pacia instead of pacda because AD keys can change during
@@ -245,7 +245,7 @@ static void *sign_code(const void *address, pac_salt_t modifier)
 		  modifier);
 
 	asm(
-#if IS_ENABLED(CONFIG_PAC_MTE_EVAL_CODEGEN)
+#if 0//IS_ENABLED(CONFIG_PAC_MTE_EVAL_CODEGEN)
 		PAC_SUB_INSTS
 #else
 		"pacia %[addr], %[mod]"
@@ -262,9 +262,21 @@ static void *compute_pac(const void *addr, clique_color_t color,
 {
 	pac_salt_t modifier = PAC_MODIFIER(claque_id, HAKC_MASK_COLOR(color));
 	u64 ctx_addr = HAKC_CONTEXT_ADDR(addr);
+	u64 claque_bits = HAKC_CLAQUE_ADDR(addr);
 	void *signed_ptr;
+	void *final_ptr;
 
+	pr_info("PACGEN in: addr=%px color=%u claque=%lu\n",
+		addr, color, claque_id);
+	pr_info("PACGEN pieces: ctx=%px claque_bits=%#llx mod=%lx\n",
+		(void *)ctx_addr,
+		(unsigned long long)claque_bits,
+		modifier);
 	signed_ptr = sign_func((const void *)ctx_addr, modifier);
+	final_ptr = (void *)((u64)signed_ptr | claque_bits);
+
+	pr_info("PACGEN out: signed_ctx=%px final=%px\n",
+		signed_ptr, final_ptr);
 	return (void *)((u64)signed_ptr | HAKC_CLAQUE_ADDR(addr));
 }
 
@@ -354,7 +366,7 @@ static void *hakc_auth_data_ptr(const void *address, pac_salt_t modifier)
 		  modifier);
 
 	asm(
-#if IS_ENABLED(CONFIG_PAC_MTE_EVAL_CODEGEN)
+#if 0//IS_ENABLED(CONFIG_PAC_MTE_EVAL_CODEGEN)
 		PAC_SUB_INSTS
 #else
 		// Using autia instead of autda because AD keys can change during
@@ -364,9 +376,9 @@ static void *hakc_auth_data_ptr(const void *address, pac_salt_t modifier)
 		: "=r"(result)
 		: [addr] "0"(address), [mod] "r"(modifier)
 		:);
-	if (HAKC_DEBUG && mte_global_debug) {
+	//if (HAKC_DEBUG && mte_global_debug) {
 		pr_info("result: %lx\n", result);
-	}
+	//}
 	return result;
 }
 
@@ -377,7 +389,7 @@ static void *hakc_auth_code_ptr(const void *address, pac_salt_t modifier)
 		  modifier);
 
 	asm(
-#if IS_ENABLED(CONFIG_PAC_MTE_EVAL_CODEGEN)
+#if 0//IS_ENABLED(CONFIG_PAC_MTE_EVAL_CODEGEN)
 		PAC_SUB_INSTS
 #else
 		"autia %[addr], %[mod]"
@@ -388,7 +400,116 @@ static void *hakc_auth_code_ptr(const void *address, pac_salt_t modifier)
 	return result;
 }
 
-static void *check_hakc_access(const void *address,
+DEFINE_PER_CPU(unsigned long, hakc_last_chk_caller);
+static __always_inline u64 pacia_mod(u64 ptr, u64 mod)
+{
+    u64 x = ptr;
+    asm volatile(
+        "pacia %0, %1"
+        : "+&r"(x)          // + : in-out, & : 禁止跟其他 input 共用 reg
+        : "r"(mod)
+        : "memory"
+    );
+    return x;
+}
+
+
+static __always_inline void *untag_ptr(const void *p)
+{
+    unsigned long v = (unsigned long)p;
+    v &= ~(0xFFUL << 56);                 // strip top byte tag
+    // sign-extend 48-bit VA so bit[55] replicates into [63:56]
+    v = (unsigned long)(((long)v << 16) >> 16);
+    return (void *)v;
+}
+EXPORT_SYMBOL_GPL(untag_ptr);
+
+/* New: force a canonical kernel VA after untagging. */
+static __always_inline void *canon_kernel_va(const void *p) {
+    unsigned long v = (unsigned long)untag_ptr(p);
+    /* For 48-bit VA kernels, make sure the top half is all 1s (kernel space). */
+    v |= 0xFFFF000000000000UL;
+    return (void *)v;
+}
+
+static __always_inline unsigned long canonical_kva(unsigned long v)
+{
+    unsigned long mask = (1UL << VA_BITS) - 1;
+    return sign_extend64(v & mask, VA_BITS - 1);
+}
+
+static __always_inline bool is_percpu_va_canon(unsigned long va_canon)
+{
+    if (is_kernel_percpu_address(va_canon))
+        return true;
+#if IS_ENABLED(CONFIG_MODULES)
+    if (is_module_percpu_address((void *)va_canon))
+        return true;
+#endif
+
+#ifdef CONFIG_ARM64
+    /* ARM64 first-chunk alias commonly sits at 0xfffffdffxxxxxxxx.
+     * Heuristic fallback in case helpers miss (older 5.10 builds can).
+     */
+    if ( (va_canon & 0xFFFF000000000000UL) == 0xFFFF000000000000UL &&
+         ((va_canon >> 32) & 0xFFFFUL) == 0xFDFFUL )
+        return true;
+#endif
+    return false;
+}
+
+static __always_inline bool is_percpu_va(const void *p)
+{
+    unsigned long canon = canonical_kva((unsigned long)untag_ptr(p));
+    return is_percpu_va_canon(canon);
+}
+
+static __always_inline void *canonicalize_kva(const void *p) {
+    u64 v = (u64)p;
+    v &= ~((u64)0xFF << 56);        // drop TBI/MTE tag byte
+#if defined(VA_BITS) && VA_BITS == 52
+    v = sign_extend64(v, 51);
+#else
+    // 48-bit VA is common on 5.10 arm64; adjust if your VA_BITS differs
+    v = sign_extend64(v, 55);
+#endif
+    return (void *)v;
+}
+#include <linux/kallsyms.h>
+#include <linux/string.h>     // strstr()
+
+char* white_list[] = {
+	"__ipv6_chk_addr_and_flags+0x128",
+"ip6_default_advmss+0xc8",
+"ip6_default_advmss+0xc8",
+"ip6_input+0x60",
+"ip6_protocol_deliver_rcu+0x90",
+"tcp_v6_rcv+0x68",
+"tcp_v6_rcv+0x310",
+"ipv6_rcv+0x64",
+"ip6_rcv_core+0xe8",
+"ip6_input+0x60",
+"ip6_protocol_deliver_rcu+0x90",
+"tcp_v6_rcv+0x68",
+"tcp_v6_rcv+0x310",
+"tcp_v6_do_rcv+0x40"
+};
+
+static __always_inline bool caller_in_whitelist(unsigned long ip)
+{
+    char sym[KSYM_SYMBOL_LEN];
+    int i;
+
+    sprint_symbol(sym, ip);  // e.g. "ipv6_add_dev+0x188/0x564"
+    for (i = 0; i < ARRAY_SIZE(white_list); i++) {
+        if (strstr(sym, white_list[i]))  
+            return true;
+    }
+    return false;
+}
+
+static void * __attribute__((optnone)) check_hakc_access(
+			       const void *address,
 			       const clique_access_tok_t access_tok,
 			       void *(*auth_func)(const void *, pac_salt_t))
 {
@@ -415,22 +536,29 @@ static void *check_hakc_access(const void *address,
 
 	ctx_addr = (const void *)((u64)address | CLAQUE_BIT_MASK_2);
 	salt = obtain_modifier_cert(addr_color, addr_claque) & access_tok;
-	HAKC_INFO("ctx_addr = %lx salt = %lx\n", ctx_addr, salt);
-	result = (unsigned long)auth_func(
-		(const void *)HAKC_CONTEXT_ADDR(ctx_addr), salt);
-	result |= (0x0000FFFFFFFFFFFF & (unsigned long)ctx_addr);
+
+	if (HAKC_ALLOW) {
+		/*
+		 * In ALLOW mode, skip autia to prevent FEAT_FPAC from raising
+		 * a fatal exception on auth failure. Just reconstruct the
+		 * canonical kernel address from the (possibly signed) pointer.
+		 */
+		result = (unsigned long)HAKC_GET_SAFE_PTR(address);
+		HAKC_INFO("ALLOW: ctx_addr = %lx salt = %lx result = %lx\n",
+			  ctx_addr, salt, result);
+	} else {
+		result = (unsigned long)auth_func(
+			(const void *)HAKC_CONTEXT_ADDR(ctx_addr), salt);
+		result |= (0x0000FFFFFFFFFFFF & (unsigned long)ctx_addr);
+		HAKC_INFO("ctx_addr = %lx salt = %lx result = %lx\n",
+			  ctx_addr, salt, result);
+	}
 
 	HAKC_INFO("result = %lx address = %lx\n", result, address);
-	if (HAKC_ALLOW) {
-		if (addr_is_signed((void *)result)) {
-			HAKC_INFO("Invalid PAC signature: 0x%lx 0x%lx\n",
-				  address, salt);
-		}
-		result |= 0xFFFF000000000000;
-	}
 
 	return (void *)result;
 }
+
 
 static size_t
 hakc_get_valid_target_index(const void *target,
@@ -535,7 +663,7 @@ void *hakc_sign_pointer(void *addr, claque_id_t claque_id, clique_color_t color,
 			addr = (void *)compute_data_pac((void *)addr, color,
 							claque_id);
 		}
-#if IS_ENABLED(CONFIG_PAC_MTE_EVAL_CODEGEN)
+#if 0//IS_ENABLED(CONFIG_PAC_MTE_EVAL_CODEGEN)
 		addr = HAKC_GET_SAFE_PTR(addr);
 #else
 		addr = (void *)EMBED_CLAQUE_ID(claque_id, addr);
@@ -625,7 +753,7 @@ static void *color_and_sign(void *data_to_transfer, size_t size,
 			addr = HAKC_GET_SAFE_PTR(addr);
 		}
 
-		if (/*VALID_CLAQUE(claque_id) &&*/
+		if (//VALID_CLAQUE(claque_id) &&
 		    claque_id != get_hakc_address_claque(data_to_transfer) &&
 		    !is_code && !is_readonly(addr)) {
 			hakc_color_address((void *)addr, color, size);
@@ -641,7 +769,6 @@ static void *color_and_sign(void *data_to_transfer, size_t size,
 		return data_to_transfer;
 	}
 }
-
 void *mte_transfer_percpu(struct percpu_info *pcpu_info, size_t size,
 			  claque_id_t claque_id, clique_color_t color,
 			  bool is_code)
@@ -661,7 +788,7 @@ void *mte_transfer_percpu(struct percpu_info *pcpu_info, size_t size,
 	//	}
 
 	pcpu_ptr = pcpu_ptr_to_addr(pcpu_info->percpu_addr);
-	signed_ptr = color_and_sign(pcpu_ptr, size * nr_cpu_ids, claque_id,
+	signed_ptr = color_and_sign(pcpu_ptr, size, claque_id,
 				    color, is_code);
 	result = addr_to_pcpu_ptr(signed_ptr);
 
@@ -701,6 +828,11 @@ void *hakc_transfer_to_clique(void *data_to_transfer, size_t size,
 			      claque_id_t claque_id, clique_color_t color,
 			      bool is_code)
 {
+	if (!data_to_transfer || claque_id == 255 || mte_get_mem_tag(data_to_transfer) != 0xf0) {
+		pr_info("skip transfer\n");
+		//return hakc_safe_ptr(data_to_transfer);
+		return data_to_transfer;
+	}
 	/* TODO: These addresses are erroring out because it is readonly:
 	 * 0xffff0001132b4e00
 	 * 0xffff00011308bf00
