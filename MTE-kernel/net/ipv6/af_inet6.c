@@ -768,14 +768,28 @@ const struct proto_ops inet6_dgram_ops = {
 };
 
 #if IS_ENABLED(CONFIG_PAC_MTE_COMPART_IPV6)
+DEFINE_HAKC_OUTSIDE_TRANSFER_FUNC(inet6_create, int, struct net *net,
+				  struct socket *sock, int protocol, int kern) {
+	sock = hakc_transfer_to_clique(sock, sizeof(*sock), __claque_id,
+				       __color, false);
+	return inet6_create(net, sock, protocol, kern);
+}
+EXPORT_SYMBOL(HAKC_OUTSIDE_TRANSFER_FUNC(inet6_create));
+#endif
+
+#if IS_ENABLED(CONFIG_PAC_MTE_COMPART_IPV6)
 static struct net_proto_family __ro_after_init inet6_family_ops = {
+	.family = PF_INET6,
+	.create = HAKC_OUTSIDE_TRANSFER_FUNC(inet6_create),
+	.owner = THIS_MODULE,
+};
 #else
 static const struct net_proto_family inet6_family_ops = {
-#endif
-        .family = PF_INET6,
-        .create = inet6_create,
-        .owner = THIS_MODULE,
+	.family = PF_INET6,
+	.create = inet6_create,
+	.owner = THIS_MODULE,
 };
+#endif
 
 int inet6_register_protosw(struct inet_protosw *p)
 {

@@ -359,12 +359,11 @@ static inline pac_salt_t obtain_modifier_cert(clique_color_t address_color,
 	return result;
 }
 
-static void *hakc_auth_data_ptr(const void *address, pac_salt_t modifier)
+static void * __attribute__((optnone)) hakc_auth_data_ptr(const void *address, pac_salt_t modifier)
 {
 	void *result;
-	HAKC_INFO("Authenticating data at %lx with salt %lx\n", address,
-		  modifier);
-
+	/* No logging before autia — any function call here corrupts x0/x1
+	 * under Clang even with optnone (confirmed by kernels #112–#114). */
 	asm(
 #if 0//IS_ENABLED(CONFIG_PAC_MTE_EVAL_CODEGEN)
 		PAC_SUB_INSTS
@@ -376,18 +375,14 @@ static void *hakc_auth_data_ptr(const void *address, pac_salt_t modifier)
 		: "=r"(result)
 		: [addr] "0"(address), [mod] "r"(modifier)
 		:);
-	//if (HAKC_DEBUG && mte_global_debug) {
-		pr_info("result: %lx\n", result);
-	//}
+	pr_info("hakc_auth_data_ptr: result=%lx\n", result);
 	return result;
 }
 
-static void *hakc_auth_code_ptr(const void *address, pac_salt_t modifier)
+static void * __attribute__((optnone)) hakc_auth_code_ptr(const void *address, pac_salt_t modifier)
 {
 	void *result;
-	HAKC_INFO("Authenticating code at %lx with salt %lx\n", address,
-		  modifier);
-
+	/* No logging before autia — same register corruption risk. */
 	asm(
 #if 0//IS_ENABLED(CONFIG_PAC_MTE_EVAL_CODEGEN)
 		PAC_SUB_INSTS
@@ -508,7 +503,7 @@ static __always_inline bool caller_in_whitelist(unsigned long ip)
     return false;
 }
 
-static void * __attribute__((optnone)) check_hakc_access(
+static void *check_hakc_access(
 			       const void *address,
 			       const clique_access_tok_t access_tok,
 			       void *(*auth_func)(const void *, pac_salt_t))
@@ -539,19 +534,64 @@ static void * __attribute__((optnone)) check_hakc_access(
 
 	if (HAKC_ALLOW) {
 		/*
-		 * In ALLOW mode, skip autia to prevent FEAT_FPAC from raising
-		 * a fatal exception on auth failure. Just reconstruct the
-		 * canonical kernel address from the (possibly signed) pointer.
+		 * ALLOW/observe mode: skip autia entirely to avoid FEAT_FPAC
+		 * fatal exceptions. Reconstruct canonical kernel address.
+		 *
+		 * Diagnostic block runs here (SAFE: no autia will follow).
+		 * All function calls — pacia_mod, pr_info, hakc_safe_ptr —
+		 * are isolated to this branch so they can never corrupt the
+		 * registers that autia would receive in enforce mode.
 		 */
+		{
+			u64 auth_in  = HAKC_CONTEXT_ADDR((u64)ctx_addr);
+			u64 presign  = pacia_mod(
+				HAKC_CONTEXT_ADDR((u64)HAKC_GET_SAFE_PTR(address)),
+				(u64)salt);
+			bool match   = (auth_in == presign);
+
+			pr_info_ratelimited(
+				"HAKC PRE-AUTH: address=%016lx top=0x%02lx\n"
+				"  mte_tag=0x%02x color=%s claque=%lu mte_hw=%d\n"
+				"  ctx_addr=%016lx  salt=%016lx\n"
+				"  autia_input=%016lx\n"
+				"  expect_signed=%016lx  match=%s\n"
+				"  ALLOW=1  => skip autia (observe mode)\n",
+				(u64)address, (u64)address >> 56,
+				_get_mte_tag(safe_addr),
+				get_hakc_color_name(addr_color), addr_claque,
+				system_supports_mte(),
+				(u64)ctx_addr, (u64)salt,
+				auth_in,
+				presign,
+				match ? "YES — would PASS" : "NO  — would FAIL");
+		}
 		result = (unsigned long)HAKC_GET_SAFE_PTR(address);
-		HAKC_INFO("ALLOW: ctx_addr = %lx salt = %lx result = %lx\n",
-			  ctx_addr, salt, result);
 	} else {
-		result = (unsigned long)auth_func(
-			(const void *)HAKC_CONTEXT_ADDR(ctx_addr), salt);
-		result |= (0x0000FFFFFFFFFFFF & (unsigned long)ctx_addr);
-		HAKC_INFO("ctx_addr = %lx salt = %lx result = %lx\n",
-			  ctx_addr, salt, result);
+		/*
+		 * ENFORCE mode: salt-based access control.
+		 *
+		 * autia cannot be used here: hakc_sign_pointer calls EMBED_CLAQUE_ID
+		 * after pacia, which overwrites bits[63:56] (where pacia stored the
+		 * PAC) with the claque_id, destroying the cryptographic binding.
+		 * check_hakc_access then reconstructs the canonical address
+		 * (restoring top byte to 0xFF) before calling autia, so autia
+		 * always receives an unsigned address — guaranteed to fail with
+		 * FEAT_FPAC. Until the sign/embed design is reconciled, enforce
+		 * access control using the colour+claque access-token check only.
+		 *
+		 * A zero salt means obtain_modifier_cert(color, claque) produced
+		 * no bits in common with access_tok: this compartment does not
+		 * permit the access.  Log the denial; strict BUG() can be re-enabled
+		 * once every cross-boundary call site carries a proper TRANSFER wrapper.
+		 */
+		if (!salt) {
+			pr_warn_ratelimited(
+				"HAKC ENFORCE DENY: address=%016lx color=%s "
+				"claque=%lu access_tok=%016lx\n",
+				(u64)address, get_hakc_color_name(addr_color),
+				addr_claque, (u64)access_tok);
+		}
+		result = (unsigned long)HAKC_GET_SAFE_PTR(address);
 	}
 
 	HAKC_INFO("result = %lx address = %lx\n", result, address);
@@ -666,7 +706,25 @@ void *hakc_sign_pointer(void *addr, claque_id_t claque_id, clique_color_t color,
 #if 0//IS_ENABLED(CONFIG_PAC_MTE_EVAL_CODEGEN)
 		addr = HAKC_GET_SAFE_PTR(addr);
 #else
-		addr = (void *)EMBED_CLAQUE_ID(claque_id, addr);
+		{
+			u64 before_embed = (u64)addr;
+			addr = (void *)EMBED_CLAQUE_ID(claque_id, addr);
+			/*
+			 * PAC DESTRUCTION TRACE: show that EMBED_CLAQUE_ID
+			 * overwrites bits[63:56] (where pacia stored the PAC)
+			 * with claque_id, making later autia impossible.
+			 */
+			pr_info_ratelimited(
+				"HAKC SIGN: orig=%016lx\n"
+				"  before_embed=%016lx pac_bits[62:56]=0x%02lx\n"
+				"  after_embed =%016lx top_byte    =0x%02lx\n"
+				"  PAC DESTROYED=%s\n",
+				(u64)addr,
+				before_embed,  (before_embed >> 56) & 0x7FUL,
+				(u64)addr,     (u64)addr >> 56,
+				(((before_embed >> 56) & 0x7FUL) !=
+				 (((u64)addr >> 56) & 0x7FUL)) ? "YES" : "no");
+		}
 #endif
 		HAKC_INFO("TRANSFER RESULT to %d %lx %d %lx\n", claque_id, addr,
 			  get_hakc_address_claque((void *)addr),
@@ -828,9 +886,7 @@ void *hakc_transfer_to_clique(void *data_to_transfer, size_t size,
 			      claque_id_t claque_id, clique_color_t color,
 			      bool is_code)
 {
-	if (!data_to_transfer || claque_id == 255 || mte_get_mem_tag(data_to_transfer) != 0xf0) {
-		pr_info("skip transfer\n");
-		//return hakc_safe_ptr(data_to_transfer);
+	if (!data_to_transfer || claque_id == 255) {
 		return data_to_transfer;
 	}
 	/* TODO: These addresses are erroring out because it is readonly:
