@@ -306,6 +306,10 @@ namespace {
             get_safe_ptr_name,
             sign_ptr_with_color_name,
             sign_ptr_name,
+            /* Internal helper called by check_hakc_data/code_access; must not
+             * be instrumented by PMC pass or it will corrupt the salt/modifier
+             * that is passed to autia. */
+            "check_hakc_access",
     };
 
     /**

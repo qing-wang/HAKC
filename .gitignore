@@ -93,3 +93,4 @@ MTE-kernel/net/ipv6/Module.symvers
 MTE-kernel/pac-mte
 MTE-kernel/net/ipv6/*.c.swp
 
+MTE-kernel/debian/

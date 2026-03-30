@@ -359,40 +359,6 @@ static inline pac_salt_t obtain_modifier_cert(clique_color_t address_color,
 	return result;
 }
 
-static void * __attribute__((optnone)) hakc_auth_data_ptr(const void *address, pac_salt_t modifier)
-{
-	void *result;
-	/* No logging before autia — any function call here corrupts x0/x1
-	 * under Clang even with optnone (confirmed by kernels #112–#114). */
-	asm(
-#if 0//IS_ENABLED(CONFIG_PAC_MTE_EVAL_CODEGEN)
-		PAC_SUB_INSTS
-#else
-		// Using autia instead of autda because AD keys can change during
-		// context switch
-		"autia %[addr], %[mod]"
-#endif
-		: "=r"(result)
-		: [addr] "0"(address), [mod] "r"(modifier)
-		:);
-	return result;
-}
-
-static void * __attribute__((optnone)) hakc_auth_code_ptr(const void *address, pac_salt_t modifier)
-{
-	void *result;
-	/* No logging before autia — same register corruption risk. */
-	asm(
-#if 0//IS_ENABLED(CONFIG_PAC_MTE_EVAL_CODEGEN)
-		PAC_SUB_INSTS
-#else
-		"autia %[addr], %[mod]"
-#endif
-		: "=r"(result)
-		: [addr] "0"(address), [mod] "r"(modifier)
-		:);
-	return result;
-}
 
 DEFINE_PER_CPU(unsigned long, hakc_last_chk_caller);
 static __always_inline u64 pacia_mod(u64 ptr, u64 mod)
@@ -502,10 +468,9 @@ static __always_inline bool caller_in_whitelist(unsigned long ip)
     return false;
 }
 
-static void *check_hakc_access(
+static void * noinline check_hakc_access(
 			       const void *address,
-			       const clique_access_tok_t access_tok,
-			       void *(*auth_func)(const void *, pac_salt_t))
+			       const clique_access_tok_t access_tok)
 {
 	pac_salt_t salt;
 	unsigned long result;
@@ -529,7 +494,23 @@ static void *check_hakc_access(
 		  get_hakc_color_name(addr_color), addr_claque);
 
 	ctx_addr = (const void *)((u64)address | CLAQUE_BIT_MASK_2);
-	salt = obtain_modifier_cert(addr_color, addr_claque) & access_tok;
+
+	/*
+	 * obtain_cert: the full PAC modifier used by pacia when this pointer
+	 * was signed.  compute_pac() calls:
+	 *   pacia(HAKC_CONTEXT_ADDR(addr), obtain_modifier_cert(color, claque))
+	 * so autia must use the SAME full modifier, not a masked subset.
+	 *
+	 * salt: the intersection of obtain_cert with access_tok.  When
+	 * salt == obtain_cert, access_tok covers every bit of the pointer's
+	 * compartment → full authorization.  When salt != obtain_cert
+	 * (partial intersection), calling autia with salt would mismatch the
+	 * pacia modifier and trigger a FEAT_FPAC fatal exception.  Deny the
+	 * access instead.
+	 */
+	{
+	pac_salt_t obtain_cert = obtain_modifier_cert(addr_color, addr_claque);
+	salt = obtain_cert & access_tok;
 
 	if (HAKC_ALLOW) {
 		/*
@@ -539,31 +520,63 @@ static void *check_hakc_access(
 		result = (unsigned long)HAKC_GET_SAFE_PTR(address);
 	} else {
 		/*
-		 * ENFORCE mode: salt-based access control.
+		 * ENFORCE mode: authenticate with autia only when the access is
+		 * fully authorized and the pointer has actually been signed.
 		 *
-		 * autia cannot be used here: hakc_sign_pointer calls EMBED_CLAQUE_ID
-		 * after pacia, which overwrites bits[63:56] (where pacia stored the
-		 * PAC) with the claque_id, destroying the cryptographic binding.
-		 * check_hakc_access then reconstructs the canonical address
-		 * (restoring top byte to 0xFF) before calling autia, so autia
-		 * always receives an unsigned address — guaranteed to fail with
-		 * FEAT_FPAC. Until the sign/embed design is reconciled, enforce
-		 * access control using the colour+claque access-token check only.
+		 * Three conditions must all hold before calling autia:
 		 *
-		 * A zero salt means obtain_modifier_cert(color, claque) produced
-		 * no bits in common with access_tok: this compartment does not
-		 * permit the access.  Log the denial; strict BUG() can be re-enabled
-		 * once every cross-boundary call site carries a proper TRANSFER wrapper.
+		 * 1. VALID_CLAQUE: the pointer's claque_id is in [1,254],
+		 *    meaning it went through EMBED_CLAQUE_ID.
+		 *
+		 * 2. salt == obtain_cert: access_tok is a superset of the
+		 *    pointer's full compartment descriptor.  Only then does
+		 *    salt equal the modifier used by pacia, so autia will
+		 *    succeed.  A partial intersection (salt != 0 but salt !=
+		 *    obtain_cert) must be treated as a denial — calling autia
+		 *    with a partial modifier triggers FEAT_FPAC.
+		 *
+		 * 3. PAC present: pacia stores the PAC in bits[55:48].  A
+		 *    canonical kernel address has bits[55:48]==0xFF; after
+		 *    ctx_addr = address | CLAQUE_BIT_MASK_2 the PAC (or 0xFF)
+		 *    is in bits[55:48] of ctx_addr.  Calling autia on an
+		 *    unsigned pointer (bits[55:48]==0xFF) triggers FEAT_FPAC.
 		 */
-		if (!salt) {
-			pr_warn_ratelimited(
-				"HAKC ENFORCE DENY: address=%016lx color=%s "
-				"claque=%lu access_tok=%016lx\n",
-				(u64)address, get_hakc_color_name(addr_color),
-				addr_claque, (u64)access_tok);
+		if (VALID_CLAQUE(addr_claque) && salt && salt == obtain_cert &&
+		    (((u64)ctx_addr >> 48) & 0xFF) != 0xFF) {
+			/*
+			 * Fully authorized signed pointer: call autia with the
+			 * same full modifier that pacia used during signing.
+			 * Use inline asm to prevent any PMC-pass transformation.
+			 */
+			result = HAKC_CONTEXT_ADDR(ctx_addr);
+			asm volatile("autia %0, %1"
+				     : "+r"(result)
+				     : "r"(obtain_cert));
+			result |= (0x0000FFFFFFFFFFFF & (unsigned long)ctx_addr);
+		} else {
+			/*
+			 * Access is denied. Cases:
+			 * 1. !VALID_CLAQUE: canonical (unsigned) pointer, never
+			 *    through EMBED_CLAQUE_ID.
+			 * 2. salt != obtain_cert: access_tok does not fully cover
+			 *    the pointer's compartment (partial or no intersection).
+			 * 3. bits[55:48]==0xFF: pointer has claque bits but was
+			 *    never pacia'd (e.g. EMBED_CLAQUE_ID before pacia).
+			 * In all cases return safe_ptr without calling autia.
+			 */
+			if (VALID_CLAQUE(addr_claque) && !salt) {
+				pr_warn_ratelimited(
+					"HAKC ENFORCE DENY: address=%016lx color=%s "
+					"claque=%lu access_tok=%016lx\n",
+					(u64)address, get_hakc_color_name(addr_color),
+					addr_claque, (u64)access_tok);
+			}
+			result = (unsigned long)HAKC_GET_SAFE_PTR(address);
 		}
-		result = (unsigned long)HAKC_GET_SAFE_PTR(address);
+		HAKC_INFO("ctx_addr = %lx salt = %lx result = %lx\n",
+			  ctx_addr, salt, result);
 	}
+	} /* end obtain_cert scope */
 
 	HAKC_INFO("result = %lx address = %lx\n", result, address);
 
@@ -587,11 +600,17 @@ hakc_get_valid_target_index(const void *target,
 
 	for (i = 0; i < n_targets; i++) {
 		const claque_entry_tok_t entry_token = valid_targets[i];
+		u64 auth_target;
+
 		salt = create_pac_context(entry_token.claque_id,
 					  masked_color &
 						  entry_token.entry_token);
-		if (verify_and_set_auth_ptr(
-			    (u64)hakc_auth_code_ptr(target, salt), NULL)) {
+		auth_target = (u64)target;
+		if (salt)
+			asm volatile("autia %0, %1"
+				     : "+r"(auth_target)
+				     : "r"(salt));
+		if (verify_and_set_auth_ptr(auth_target, NULL)) {
 			result = i;
 			break;
 		}
@@ -604,7 +623,7 @@ void *check_hakc_data_access(const void *address,
 			     const clique_access_tok_t access_tok)
 {
 	HAKC_INFO("check_hakc_data_access called from %lx\n", _RET_IP_);
-	return check_hakc_access(address, access_tok, hakc_auth_data_ptr);
+	return check_hakc_access(address, access_tok);
 }
 
 EXPORT_SYMBOL(check_hakc_data_access);
@@ -619,7 +638,7 @@ void *check_hakc_code_access(const void *address,
 	HAKC_INFO("Checking code access to %lx for %ld targets\n", address,
 		  n_targets);
 	authenticated_ptr =
-		check_hakc_access(address, access_tok, hakc_auth_code_ptr);
+		check_hakc_access(address, access_tok);
 	if (addr_is_signed(authenticated_ptr) && n_targets > 0) {
 		result = (hakc_get_valid_target_index(address, valid_targets,
 						      n_targets) >= 0);
@@ -784,55 +803,49 @@ void *mte_transfer_percpu(struct percpu_info *pcpu_info, size_t size,
 			  claque_id_t claque_id, clique_color_t color,
 			  bool is_code)
 {
-	void *result, *pcpu_ptr, *signed_ptr;
-	//	unsigned int cpu;
+	void *pcpu_ptr;
 
 	HAKC_INFO("Transferring percpu variable %lx with size %lx to %d and "
 		  "color %s\n",
 		  pcpu_info->signed_addr, size, claque_id,
 		  get_hakc_color_name(color));
 
-	//	if(!pcpu_info->is_dynamic) {
-	//		return color_and_sign(raw_cpu_ptr(pcpu_info->signed_addr),
-	//				      size * num_online_cpus(),
-	//				      claque_id, color, false);
-	//	}
-
+	/*
+	 * Convert the per-CPU offset pointer to a regular virtual address so
+	 * we can apply MTE color tags to the actual memory.
+	 */
 	pcpu_ptr = pcpu_ptr_to_addr(pcpu_info->percpu_addr);
-	signed_ptr = color_and_sign(pcpu_ptr, size, claque_id,
-				    color, is_code);
-	result = addr_to_pcpu_ptr(signed_ptr);
 
-	//	for_each_possible_cpu (cpu) {
-	//		pcpu_ptr = per_cpu_ptr(pcpu_info->percpu_addr, cpu);
-	//		HAKC_INFO("\tpcpu_ptr = %lx\n", pcpu_ptr);
-	//		pr_info("mte_transfer_percpu pcpu_info->percpu_addr = "
-	//			"%lx\nvirt_addr_valid = %d\n"
-	//			"is_kernel_percpu_address %d\n"
-	//			"is_module_percpu_address %d\n"
-	//			"is_dynamic_percpu_address %d\n",
-	//			pcpu_info->percpu_addr,
-	//			virt_addr_valid(pcpu_info->percpu_addr),
-	//			is_kernel_percpu_address(pcpu_info->percpu_addr),
-	//			is_module_percpu_address(pcpu_info->percpu_addr),
-	//			is_dynamic_percpu_address(pcpu_info->percpu_addr)
-	//		);
-	//		signed_ptr = color_and_sign(pcpu_ptr, size, claque_id, color,
-	//					    is_code);
-	//		HAKC_INFO("\tsigned_ptr = %lx\n", signed_ptr);
-	//		if (cpu == get_boot_cpu_id()) {
-	//			u64 offset = ((u64)pcpu_ptr - (u64)pcpu_info->percpu_addr);
-	//			HAKC_INFO("\toffset = %lx\n", offset);
-	//			result = (void *)((u64)signed_ptr - offset);
-	//		}
-	//	}
+	/*
+	 * Color the per-CPU memory using its virtual address.
+	 * We deliberately skip PAC signing of the per-CPU BASE pointer here.
+	 *
+	 * Background: color_and_sign() would call pacia on the virtual address,
+	 * then addr_to_pcpu_ptr() converts back via integer arithmetic
+	 * (ptr - pcpu_base_addr + __per_cpu_start).  That arithmetic scrambles
+	 * the PAC/claque bits stored in bits[63:48], producing a per-CPU offset
+	 * value whose upper bytes are garbage.  When the PMC pass later checks
+	 * this value via check_hakc_access(), the scrambled bits accidentally
+	 * satisfy all four autia guards, but autia fails (FEAT_FPAC) because
+	 * the pointer was never authentically pacia'd with those parameters.
+	 *
+	 * Per-CPU pointer arithmetic (per_cpu_ptr = base + __per_cpu_offset[cpu])
+	 * is fundamentally incompatible with having PAC/claque bits in the high
+	 * bytes of the base pointer.  We therefore only apply MTE color tagging
+	 * (via the virtual address) and return the original per-CPU offset
+	 * pointer unchanged.  Access control for per-CPU elements is enforced
+	 * through MTE color checking on the element virtual addresses.
+	 */
+	if (!is_code && !is_readonly((unsigned long)pcpu_ptr) &&
+	    claque_id != get_hakc_address_claque(pcpu_ptr)) {
+		hakc_color_address(pcpu_ptr, color, size);
+	}
 
-	HAKC_INFO(
-		"Transferred percpu variable %lx: %lx (%lx %lx)\n",
-		pcpu_info->percpu_addr, result, per_cpu_ptr(result, 0),
-		check_hakc_data_access(per_cpu_ptr(result, 0),
-				       obtain_modifier_cert(color, claque_id)));
-	return result;
+	HAKC_INFO("Transferred percpu variable %lx (color only, no PAC sign)\n",
+		  pcpu_info->percpu_addr);
+
+	/* Return the original per-CPU offset pointer so per_cpu_ptr() works. */
+	return pcpu_info->signed_addr;
 }
 
 void *hakc_transfer_to_clique(void *data_to_transfer, size_t size,

@@ -1,1 +1,1 @@
-obj-$(CONFIG_PAC_MTE_COMPART) += hakc.o hakc-transfer.o
+obj-$(CONFIG_PAC_MTE_COMPART) += hakc.o hakc-asm.o hakc-transfer.o
