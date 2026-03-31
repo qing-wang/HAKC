@@ -94,3 +94,6 @@ MTE-kernel/pac-mte
 MTE-kernel/net/ipv6/*.c.swp
 
 MTE-kernel/debian/
+*.buildinfo
+*.changes
+*.deb
