@@ -17,6 +17,13 @@ namespace {
      * are not recolored, and the authenticated pointer is passed when invoked.
      */
     const std::set<StringRef> safe_transition_functions = {
+	    "csum_and_copy_from_iter_full",
+	    "__arch_copy_from_user",
+	    "dql_completed",
+	    "bnxt_poll",
+	    "do_csum",
+	    "csum_partial",
+
 	    "kmem_cache_free",
 	    "__sk_destruct",
 	    "sk_prot_alloc",

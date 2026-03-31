@@ -76,6 +76,14 @@ int memcmp_pages(struct page *page1, struct page *page2)
 
 u8 mte_get_mem_tag(void *addr)
 {
+        unsigned long canon = ((unsigned long)addr & 0x0000FFFFFFFFFFFFUL) |
+                              0xFFFF000000000000UL;
+
+        if (!virt_addr_valid((void *)canon) && !is_vmalloc_addr((void *)canon)) {
+                pr_info("mte_get_mem_tag: invalid/unmapped addr=%px canon=%px\n",
+                        addr, (void *)canon);
+                return 0xf0;
+        }
 #if MTE_DISABLED
 	return 0;
 #else

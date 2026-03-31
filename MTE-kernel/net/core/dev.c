@@ -6916,6 +6916,10 @@ static __latent_entropy void net_rx_action(struct softirq_action *h)
 		}
 
 		n = list_first_entry(&list, struct napi_struct, poll_list);
+		n = (struct napi_struct *)hakc_safe_ptr(n);
+		if (!n){
+		        goto out;
+		}
 		budget -= napi_poll(n, &repoll);
 
 		/* If softirq window is exhausted then punt.
