@@ -852,7 +852,9 @@ void *hakc_transfer_to_clique(void *data_to_transfer, size_t size,
 			      claque_id_t claque_id, clique_color_t color,
 			      bool is_code)
 {
-	if (!data_to_transfer || claque_id == 255) {
+	if (!data_to_transfer || claque_id == 255 || mte_get_mem_tag(data_to_transfer) != 0xf0) {
+		pr_info("skip transfer\n");
+		//return hakc_safe_ptr(data_to_transfer);
 		return data_to_transfer;
 	}
 	/* TODO: These addresses are erroring out because it is readonly:
