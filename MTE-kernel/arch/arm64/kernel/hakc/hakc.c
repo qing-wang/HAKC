@@ -14,11 +14,11 @@
 
 #define HAKC_INFO(fmt, ...)                                                    \
 	if (HAKC_DEBUG) {                                                      \
-		pr_info(fmt, ##__VA_ARGS__);                                   \
+		/*pr_info(fmt, ##__VA_ARGS__); */                                  \
 	}
 #define HAKC_ERR(fmt, ...)                                                     \
 	if (HAKC_DEBUG) {                                                      \
-		pr_err(fmt, ##__VA_ARGS__);                                    \
+		/*pr_err(fmt, ##__VA_ARGS__);*/                                    \
 	}
 
 #if IS_ENABLED(CONFIG_PAC_MTE_EVAL_ENABLE_PAC)
@@ -265,18 +265,20 @@ static void *compute_pac(const void *addr, clique_color_t color,
 	u64 claque_bits = HAKC_CLAQUE_ADDR(addr);
 	void *signed_ptr;
 	void *final_ptr;
-
+/*
 	pr_info("PACGEN in: addr=%px color=%u claque=%lu\n",
 		addr, color, claque_id);
 	pr_info("PACGEN pieces: ctx=%px claque_bits=%#llx mod=%lx\n",
 		(void *)ctx_addr,
 		(unsigned long long)claque_bits,
 		modifier);
+*/
 	signed_ptr = sign_func((const void *)ctx_addr, modifier);
 	final_ptr = (void *)((u64)signed_ptr | claque_bits);
-
+/*
 	pr_info("PACGEN out: signed_ctx=%px final=%px\n",
 		signed_ptr, final_ptr);
+*/
 	return (void *)((u64)signed_ptr | HAKC_CLAQUE_ADDR(addr));
 }
 
@@ -439,20 +441,9 @@ static __always_inline void *canonicalize_kva(const void *p) {
 #include <linux/string.h>     // strstr()
 
 char* white_list[] = {
-	"__ipv6_chk_addr_and_flags+0x128",
-"ip6_default_advmss+0xc8",
-"ip6_default_advmss+0xc8",
-"ip6_input+0x60",
-"ip6_protocol_deliver_rcu+0x90",
-"tcp_v6_rcv+0x68",
-"tcp_v6_rcv+0x310",
-"ipv6_rcv+0x64",
-"ip6_rcv_core+0xe8",
-"ip6_input+0x60",
-"ip6_protocol_deliver_rcu+0x90",
-"tcp_v6_rcv+0x68",
-"tcp_v6_rcv+0x310",
-"tcp_v6_do_rcv+0x40"
+	"ndisc_recv_ns+0x4f0",
+	"tcp_v6_do_rcv+0x38",
+	"ip6_finish_output2+0x50"
 };
 
 static __always_inline bool caller_in_whitelist(unsigned long ip)
@@ -484,6 +475,16 @@ static void * noinline check_hakc_access(
 	} else if (IS_ERR(address)) {
 		return (void *)address;
 	}
+		unsigned long ip = this_cpu_read(hakc_last_chk_caller);
+		ip = ptrauth_strip_insn_pac(ip);
+		if (ip) ip -= 4;
+		if (caller_in_whitelist(ip)){
+//			pr_err("white list detected\n");
+//			pr_err("NOT CORRECT caller=%pS current ptr=%px addr=%px\n",\
+//			 (void *)ip, ctx_addr, address);
+			return hakc_safe_ptr(address);
+		}
+
 	safe_addr = (void*)HAKC_GET_SAFE_PTR(address);
 
 	HAKC_INFO("access_tok = 0x%lx\taddress = 0x%lx\n", access_tok, address);
@@ -580,7 +581,11 @@ static void * noinline check_hakc_access(
 
 	HAKC_INFO("result = %lx address = %lx\n", result, address);
 
-	return (void *)result;
+	//return (void *)result;
+	__s64 aa = (__s64)result;     // ptr might be 0x02ea… (unauthenticated alias), or even attacker-crafted
+	aa |= 0xFFFF000000000000;//(aa << 16) >> 16;  // canonicalize to 0xffff…
+	
+	return (void *)aa;
 }
 
 
@@ -622,6 +627,7 @@ hakc_get_valid_target_index(const void *target,
 void *check_hakc_data_access(const void *address,
 			     const clique_access_tok_t access_tok)
 {
+	this_cpu_write(hakc_last_chk_caller, (unsigned long)_RET_IP_);
 	HAKC_INFO("check_hakc_data_access called from %lx\n", _RET_IP_);
 	return check_hakc_access(address, access_tok);
 }
@@ -853,8 +859,6 @@ void *hakc_transfer_to_clique(void *data_to_transfer, size_t size,
 			      bool is_code)
 {
 	if (!data_to_transfer || claque_id == 255 || mte_get_mem_tag(data_to_transfer) != 0xf0) {
-		pr_info("skip transfer\n");
-		//return hakc_safe_ptr(data_to_transfer);
 		return data_to_transfer;
 	}
 	/* TODO: These addresses are erroring out because it is readonly:

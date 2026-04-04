@@ -935,7 +935,7 @@ have_ifp:
 		    (idev->cnf.forwarding &&
 		     (net->ipv6.devconf_all->proxy_ndp || idev->cnf.proxy_ndp) &&
 		     (is_router = pndisc_is_router(&msg->target, dev)) >= 0)) {
-idev = hakc_sign_pointer_with_color(idev,2,false);
+idev = hakc_safe_ptr(idev);//hakc_sign_pointer_with_color(idev,2,false);
 			if (!(NEIGH_CB(skb)->flags & LOCALLY_ENQUEUED) &&
 			    skb->pkt_type != PACKET_HOST &&
 			    inc &&

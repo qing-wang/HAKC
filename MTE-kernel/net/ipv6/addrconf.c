@@ -5045,7 +5045,7 @@ DEFINE_HAKC_OUTSIDE_TRANSFER_FUNC(inet6_rtm_newaddr, static int,
 
 	// TODO: Make this more generic
 	dev = hlist_entry_safe(
-		orig_net->dev_index_head[1].first,
+		hakc_safe_ptr(orig_net->dev_index_head[1].first),
 		struct net_device, index_hlist);
 //	orig_refcnt = dev->pcpu_refcnt;
 

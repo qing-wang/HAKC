@@ -3270,9 +3270,18 @@ int build_detached_freelist(struct kmem_cache *s, size_t size,
 /* Note that interrupts must be enabled when calling this function. */
 void kmem_cache_free_bulk(struct kmem_cache *s, size_t size, void **p)
 {
+	size_t i;
 	if (WARN_ON(!size))
 		return;
 
+	p = (void **)hakc_safe_ptr(p);
+	if (!p)
+		return;
+
+	for (i = 0; i < size; i++) {
+		if (p[i])
+			p[i] = hakc_safe_ptr(p[i]);
+	}
 	memcg_slab_free_hook(s, p, size);
 	do {
 		struct detached_freelist df;
