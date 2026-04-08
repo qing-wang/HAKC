@@ -441,8 +441,8 @@ static __always_inline void *canonicalize_kva(const void *p) {
 #include <linux/string.h>     // strstr()
 
 char* white_list[] = {
-	"ndisc_recv_ns+0x4f0",
-	"tcp_v6_do_rcv+0x38",
+//	"ndisc_recv_ns+0x4f0",
+//	"tcp_v6_do_rcv+0x38",
 	"ip6_finish_output2+0x50"
 };
 
@@ -475,15 +475,7 @@ static void * noinline check_hakc_access(
 	} else if (IS_ERR(address)) {
 		return (void *)address;
 	}
-		unsigned long ip = this_cpu_read(hakc_last_chk_caller);
-		ip = ptrauth_strip_insn_pac(ip);
-		if (ip) ip -= 4;
-		if (caller_in_whitelist(ip)){
-//			pr_err("white list detected\n");
-//			pr_err("NOT CORRECT caller=%pS current ptr=%px addr=%px\n",\
-//			 (void *)ip, ctx_addr, address);
-			return hakc_safe_ptr(address);
-		}
+
 
 	safe_addr = (void*)HAKC_GET_SAFE_PTR(address);
 
@@ -495,7 +487,17 @@ static void * noinline check_hakc_access(
 		  get_hakc_color_name(addr_color), addr_claque);
 
 	ctx_addr = (const void *)((u64)address | CLAQUE_BIT_MASK_2);
-
+/*
+		unsigned long ip = this_cpu_read(hakc_last_chk_caller);
+		ip = ptrauth_strip_insn_pac(ip);
+		if (ip) ip -= 4;
+		if (caller_in_whitelist(ip)){
+			pr_err("white list detected\n");
+			pr_err("NOT CORRECT caller=%pS current ptr=%px addr=%px\n",\
+			 (void *)ip, ctx_addr, address);
+			return hakc_safe_ptr(address);
+		}
+*/
 	/*
 	 * obtain_cert: the full PAC modifier used by pacia when this pointer
 	 * was signed.  compute_pac() calls:
@@ -629,6 +631,7 @@ void *check_hakc_data_access(const void *address,
 {
 	this_cpu_write(hakc_last_chk_caller, (unsigned long)_RET_IP_);
 	HAKC_INFO("check_hakc_data_access called from %lx\n", _RET_IP_);
+	//return hakc_safe_ptr(address);
 	return check_hakc_access(address, access_tok);
 }
 
