@@ -1,20 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
-/*
- * hakc-asm.S — HAKC pointer-authentication leaf functions
- *
- * hakc_auth_data_ptr and hakc_auth_code_ptr are implemented in pure
- * assembly to prevent the PMC LLVM pass from inserting its pointer-
- * canonicalization sequence (orr | 0xffff000000000000) around the autia
- * instruction.  That canonicalization overwrites bits[55:48], which is
- * exactly where pacia stores the PAC on ARM64 with TBI enabled.  Once the
- * PAC is stripped the autia will always mismatch and FEAT_FPAC raises a
- * fatal exception.
- *
- * These are pure leaf functions: no frame setup, no saved LR.
- * x0 = address (pointer with PAC intact in bits[55:48])
- * x1 = modifier / salt
- * Returns: x0 = authenticated pointer (or hardware-poisoned on failure)
- */
 
 #include <linux/linkage.h>
 #include <asm/assembler.h>
