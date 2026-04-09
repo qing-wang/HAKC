@@ -141,6 +141,7 @@ namespace {
         std::map<CallInst*, std::set<Value*>> stackPtrsPassedToFuncs;
 
         HAKCModuleTransformation &M;
+	unsigned dataCheckInsertIndex = 0;
 
     public:
         unsigned addedDataCheckCount, addedCodeCheckCount, addedCliqueTransferCount, addedClaqueTransferCount;

@@ -1233,6 +1233,245 @@ namespace {
             moduleModified |= functionAnalysis.modifiedFunction();
         }
     }
+static Value *buildSafePtrInline(IRBuilder<> &B, Value *signedPtr) {
+    Type *origTy = signedPtr->getType();
+    LLVMContext &Ctx = B.getContext();
+    Type *i64Ty = Type::getInt64Ty(Ctx);
+
+    Value *ptrAsInt = B.CreatePtrToInt(signedPtr, i64Ty);
+    Value *isNull = B.CreateICmpEQ(ptrAsInt, ConstantInt::get(i64Ty, 0));
+
+    // 先做你現在想要的邏輯
+    // return (void *)((unsigned long)HAKC_KADDR(addr) | CLAQUE_BIT_MASK_2);
+
+    // 這裡先沿用你目前 pass 裡已有的 safe-pointer 寫法
+    Value *orValue = B.CreateOr(
+        ptrAsInt,
+        ConstantInt::get(i64Ty, 0xFFFF000000000000ULL)
+    );
+
+    Value *safePtr = B.CreateIntToPtr(orValue, origTy);
+
+    return B.CreateSelect(isNull, signedPtr, safePtr);
+}
+static bool dumpNdiscRecvNsChecks(Function &F) {
+    if (F.getName() != "ndisc_recv_ns")
+        return false;
+
+    unsigned checkIndex = 0;
+
+    errs() << "\n[HAKC] dump checks in " << F.getName() << "\n";
+
+    for (auto &BB : F) {
+        errs() << "[BB] " << BB.getName() << "\n";
+        for (auto &I : BB) {
+            auto *CI = dyn_cast<CallInst>(&I);
+            if (!CI)
+                continue;
+
+            Value *called = CI->getCalledOperand()->stripPointerCasts();
+            Function *Callee = dyn_cast<Function>(called);
+            if (!Callee)
+                continue;
+
+            if (Callee->getName() != "check_hakc_data_access")
+                continue;
+
+            checkIndex++;
+            errs() << "  check #" << checkIndex << ": ";
+            CI->print(errs());
+            errs() << "\n";
+
+            if (DILocation *Loc = I.getDebugLoc()) {
+                errs() << "    debug: " << Loc->getFilename()
+                       << ":" << Loc->getLine()
+                       << ":" << Loc->getColumn() << "\n";
+            }
+        }
+    }
+
+    errs() << "[HAKC] total checks = " << checkIndex << "\n\n";
+    return false;
+}
+static bool rewriteCheckByDebugLoc(Function &F,
+                                   StringRef FuncName,
+                                   StringRef FileSuffix,
+                                   unsigned Line,
+                                   unsigned Col) {
+    if (F.getName() != FuncName)
+        return false;
+
+    for (Instruction &I : instructions(F)) {
+        auto *CI = dyn_cast<CallInst>(&I);
+        if (!CI)
+            continue;
+
+        Value *called = CI->getCalledOperand()->stripPointerCasts();
+        Function *Callee = dyn_cast<Function>(called);
+        if (!Callee || Callee->getName() != "check_hakc_data_access")
+            continue;
+
+        DILocation *Loc = I.getDebugLoc();
+        if (!Loc)
+            continue;
+
+        StringRef File = Loc->getFilename();
+        if (!File.endswith(FileSuffix))
+            continue;
+
+        if (Loc->getLine() != Line || Loc->getColumn() != Col)
+            continue;
+
+        IRBuilder<> B(CI);
+        Value *signedPtr = CI->getArgOperand(0);
+        Value *newVal = buildSafePtrInline(B, signedPtr);
+
+        if (newVal->getType() != CI->getType())
+            newVal = B.CreateBitCast(newVal, CI->getType());
+
+        errs() << "[HAKC] rewrite check at "
+               << File << ":" << Line << ":" << Col
+               << " in " << FuncName << "\n";
+
+        CI->replaceAllUsesWith(newVal);
+        CI->eraseFromParent();
+        return true;
+    }
+
+    errs() << "[HAKC] target check not found at "
+           << FileSuffix << ":" << Line << ":" << Col
+           << " in " << FuncName << "\n";
+    return false;
+}
+static bool rewriteNthCheckInFunction(Function &F,
+                                      StringRef FuncName,
+                                      unsigned TargetIndex) {
+    if (F.getName() != FuncName)
+        return false;
+
+    unsigned checkIndex = 0;
+
+    for (Instruction &I : instructions(F)) {
+        auto *CI = dyn_cast<CallInst>(&I);
+        if (!CI)
+            continue;
+
+        Value *called = CI->getCalledOperand()->stripPointerCasts();
+        Function *Callee = dyn_cast<Function>(called);
+        if (!Callee)
+            continue;
+
+        if (Callee->getName() != "check_hakc_data_access")
+            continue;
+
+        checkIndex++;
+
+        if (checkIndex != TargetIndex)
+            continue;
+
+        IRBuilder<> B(CI);
+        Value *signedPtr = CI->getArgOperand(0);
+        Value *newVal = buildSafePtrInline(B, signedPtr);
+
+        if (newVal->getType() != CI->getType())
+            newVal = B.CreateBitCast(newVal, CI->getType());
+
+        errs() << "[HAKC] rewrite check_hakc_data_access #"
+               << TargetIndex << " in " << FuncName
+               << " to inline safe ptr\n";
+
+        CI->replaceAllUsesWith(newVal);
+        CI->eraseFromParent();
+        return true;
+    }
+
+    errs() << "[HAKC] did not find check_hakc_data_access #"
+           << TargetIndex << " in " << FuncName
+           << ", found only " << checkIndex << "\n";
+    return false;
+}
+static bool rewriteTwelfthNdiscRecvNs(Function &F) {
+    if (F.getName() != "ndisc_recv_ns")
+        return false;
+
+    unsigned checkIndex = 0;
+
+    for (auto &BB : F) {
+        for (auto It = BB.begin(); It != BB.end(); ) {
+            Instruction *I = &*It++;
+            auto *CI = dyn_cast<CallInst>(I);
+            if (!CI)
+                continue;
+
+            Value *called = CI->getCalledOperand()->stripPointerCasts();
+            Function *Callee = dyn_cast<Function>(called);
+            if (!Callee)
+                continue;
+
+            if (Callee->getName() != "check_hakc_data_access")
+                continue;
+
+            checkIndex++;
+
+            if (checkIndex != 12)
+                continue;
+
+            IRBuilder<> B(CI);
+            Value *signedPtr = CI->getArgOperand(0);
+            Value *newVal = buildSafePtrInline(B, signedPtr);
+
+            if (newVal->getType() != CI->getType())
+                newVal = B.CreateBitCast(newVal, CI->getType());
+
+            errs() << "[HAKC] rewrite check_hakc_data_access #12 in ndisc_recv_ns "
+                   << "to inline safe ptr\n";
+
+            CI->replaceAllUsesWith(newVal);
+            CI->eraseFromParent();
+            return true;
+        }
+    }
+
+    errs() << "[HAKC] did not find check_hakc_data_access #12 in ndisc_recv_ns, "
+           << "found only " << checkIndex << "\n";
+    return false;
+}
+
+
+static bool rewriteFirstTcpV6DoRcvCheckToInlineSafePtr(Function &F) {
+    if (F.getName() != "tcp_v6_do_rcv")
+        return false;
+
+    for (auto &BB : F) {
+        for (auto It = BB.begin(); It != BB.end(); ++It) {
+            auto *CI = dyn_cast<CallInst>(&*It);
+            if (!CI)
+                continue;
+
+            Value *called = CI->getCalledOperand()->stripPointerCasts();
+            Function *Callee = dyn_cast<Function>(called);
+            if (!Callee)
+                continue;
+
+            if (Callee->getName() != "check_hakc_data_access")
+                continue;
+
+            IRBuilder<> B(CI);
+            Value *signedPtr = CI->getArgOperand(0);
+            Value *newVal = buildSafePtrInline(B, signedPtr);
+
+            if (newVal->getType() != CI->getType())
+                newVal = B.CreateBitCast(newVal, CI->getType());
+
+            errs() << "[HAKC] rewrite first check_hakc_data_access in tcp_v6_do_rcv to inline safe ptr\n";
+            CI->replaceAllUsesWith(newVal);
+            CI->eraseFromParent();
+            return true;
+        }
+    }
+
+    return false;
+}
 
     void HAKCModuleTransformation::compartmentalizeModule() {
         if (!isCompartmentalized()) {
@@ -3421,6 +3660,11 @@ namespace {
             if (debug_output) {
                 getFunction().print(errs());
             }
+	rewriteFirstTcpV6DoRcvCheckToInlineSafePtr(getFunction());
+	//rewriteCheckByDebugLoc(getFunction(), "ndisc_recv_ns", "net/ipv6/ndisc.c", 942, 8);
+	//rewriteTwelfthNdiscRecvNs(getFunction());
+	//dumpNdiscRecvNsChecks(getFunction());
+	rewriteNthCheckInFunction(getFunction(), "ndisc_recv_ns", 15);
         }
     }
     static void dumpModuleIRToTmp(llvm::Module &M, llvm::StringRef Tag) {
