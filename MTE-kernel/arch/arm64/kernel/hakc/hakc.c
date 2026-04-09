@@ -498,75 +498,20 @@ static void * noinline check_hakc_access(
 			return hakc_safe_ptr(address);
 		}
 */
-	/*
-	 * obtain_cert: the full PAC modifier used by pacia when this pointer
-	 * was signed.  compute_pac() calls:
-	 *   pacia(HAKC_CONTEXT_ADDR(addr), obtain_modifier_cert(color, claque))
-	 * so autia must use the SAME full modifier, not a masked subset.
-	 *
-	 * salt: the intersection of obtain_cert with access_tok.  When
-	 * salt == obtain_cert, access_tok covers every bit of the pointer's
-	 * compartment → full authorization.  When salt != obtain_cert
-	 * (partial intersection), calling autia with salt would mismatch the
-	 * pacia modifier and trigger a FEAT_FPAC fatal exception.  Deny the
-	 * access instead.
-	 */
-	{
 	pac_salt_t obtain_cert = obtain_modifier_cert(addr_color, addr_claque);
 	salt = obtain_cert & access_tok;
 
 	if (HAKC_ALLOW) {
-		/*
-		 * ALLOW/observe mode: skip autia entirely to avoid FEAT_FPAC
-		 * fatal exceptions. Reconstruct canonical kernel address.
-		 */
 		result = (unsigned long)HAKC_GET_SAFE_PTR(address);
 	} else {
-		/*
-		 * ENFORCE mode: authenticate with autia only when the access is
-		 * fully authorized and the pointer has actually been signed.
-		 *
-		 * Three conditions must all hold before calling autia:
-		 *
-		 * 1. VALID_CLAQUE: the pointer's claque_id is in [1,254],
-		 *    meaning it went through EMBED_CLAQUE_ID.
-		 *
-		 * 2. salt == obtain_cert: access_tok is a superset of the
-		 *    pointer's full compartment descriptor.  Only then does
-		 *    salt equal the modifier used by pacia, so autia will
-		 *    succeed.  A partial intersection (salt != 0 but salt !=
-		 *    obtain_cert) must be treated as a denial — calling autia
-		 *    with a partial modifier triggers FEAT_FPAC.
-		 *
-		 * 3. PAC present: pacia stores the PAC in bits[55:48].  A
-		 *    canonical kernel address has bits[55:48]==0xFF; after
-		 *    ctx_addr = address | CLAQUE_BIT_MASK_2 the PAC (or 0xFF)
-		 *    is in bits[55:48] of ctx_addr.  Calling autia on an
-		 *    unsigned pointer (bits[55:48]==0xFF) triggers FEAT_FPAC.
-		 */
 		if (VALID_CLAQUE(addr_claque) && salt && salt == obtain_cert &&
 		    (((u64)ctx_addr >> 48) & 0xFF) != 0xFF) {
-			/*
-			 * Fully authorized signed pointer: call autia with the
-			 * same full modifier that pacia used during signing.
-			 * Use inline asm to prevent any PMC-pass transformation.
-			 */
 			result = HAKC_CONTEXT_ADDR(ctx_addr);
 			asm volatile("autia %0, %1"
 				     : "+r"(result)
 				     : "r"(obtain_cert));
 			result |= (0x0000FFFFFFFFFFFF & (unsigned long)ctx_addr);
 		} else {
-			/*
-			 * Access is denied. Cases:
-			 * 1. !VALID_CLAQUE: canonical (unsigned) pointer, never
-			 *    through EMBED_CLAQUE_ID.
-			 * 2. salt != obtain_cert: access_tok does not fully cover
-			 *    the pointer's compartment (partial or no intersection).
-			 * 3. bits[55:48]==0xFF: pointer has claque bits but was
-			 *    never pacia'd (e.g. EMBED_CLAQUE_ID before pacia).
-			 * In all cases return safe_ptr without calling autia.
-			 */
 			if (VALID_CLAQUE(addr_claque) && !salt) {
 				pr_warn_ratelimited(
 					"HAKC ENFORCE DENY: address=%016lx color=%s "
@@ -579,13 +524,9 @@ static void * noinline check_hakc_access(
 		HAKC_INFO("ctx_addr = %lx salt = %lx result = %lx\n",
 			  ctx_addr, salt, result);
 	}
-	} /* end obtain_cert scope */
-
 	HAKC_INFO("result = %lx address = %lx\n", result, address);
-
-	//return (void *)result;
-	__s64 aa = (__s64)result;     // ptr might be 0x02ea… (unauthenticated alias), or even attacker-crafted
-	aa |= 0xFFFF000000000000;//(aa << 16) >> 16;  // canonicalize to 0xffff…
+	__s64 aa = (__s64)result;   
+	aa |= 0xFFFF000000000000;
 	
 	return (void *)aa;
 }
