@@ -50,7 +50,7 @@ MTE-kernel/ubuntu-22.04-server-cloudimg-arm64-root.tar.xz
 *.dtb.S
 *.dtb
 
-MTE-kernel/.config
+# MTE-kernel/.config
 MTE-kernel/.config.old
 MTE-kernel/.tmp_System.map
 MTE-kernel/.tmp_vmlinux.kallsyms1
