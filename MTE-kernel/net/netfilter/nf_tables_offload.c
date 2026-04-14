@@ -613,9 +613,9 @@ DEFINE_HAKC_OUTSIDE_TRANSFER_FUNC(nft_offload_netdev_event, int, struct notifier
 				    unsigned long event, void *ptr)
 {
 	struct net_device *dev = netdev_notifier_info_to_dev(ptr);
-  struct net *net = dev_net(dev);
+  struct net *net = dev_net(hakc_safe_ptr(dev));
   struct netdev_notifier_info *info = ptr;
-  dev_net_set(dev, hakc_transfer_to_clique(net, sizeof(*net), __claque_id, __color, false));
+  dev_net_set(hakc_safe_ptr(dev), hakc_transfer_to_clique(net, sizeof(*net), __claque_id, __color, false));
   info->dev = hakc_transfer_to_clique(dev, sizeof(*dev), __claque_id, __color, false);
   info = hakc_transfer_to_clique(info, sizeof(*info), __claque_id, __color, false);
   return nft_offload_netdev_event(this, event, info);
