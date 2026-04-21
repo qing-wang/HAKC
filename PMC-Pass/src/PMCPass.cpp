@@ -225,6 +225,7 @@ namespace {
      * @brief The set of files to run our analysis on
      */
     const std::set<StringRef> source_files_to_instrument = {
+			"drivers/net/dummy.c",
             "net/",
             "fs/proc/proc_sysctl.c",
             "lib/list_debug.c",
