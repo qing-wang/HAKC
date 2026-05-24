@@ -25,10 +25,24 @@ namespace {
 	    "csum_partial",
 
 	    "kmem_cache_free",
+	    "kmem_cache_alloc",
+	    "kmem_cache_alloc_trace",
+	    "kmem_cache_alloc_node",
+	    "kmem_cache_alloc_node_trace",
+	    "__kmalloc",
+	    "__kmalloc_track_caller",
 	    "__sk_destruct",
 	    "sk_prot_alloc",
 	    "sk_alloc",
 	    "slab_pre_alloc_hook",
+	    "down_write",
+	    "up_write",
+	    "down_read",
+	    "up_read",
+	    "blocking_notifier_chain_register",
+	    "blocking_notifier_chain_unregister",
+	    "atomic_notifier_chain_register",
+	    "atomic_notifier_chain_unregister",
 
             "sock_zerocopy_realloc",
             "__skb_queue_tail",
@@ -2675,7 +2689,27 @@ static bool rewriteFirstTcpV6DoRcvCheckToInlineSafePtr(Function &F) {
 
         return ret;
     }
+static bool isPerCpuGlobal(Value *V) {
+    auto *GV = dyn_cast<GlobalVariable>(V);
+    if (!GV)
+        return false;
 
+    if (GV->hasSection()) {
+        StringRef Sec = GV->getSection();
+        if (Sec.contains("percpu") || Sec.contains(".data..percpu"))
+            return true;
+    }
+
+    StringRef Name = GV->getName();
+
+    // Common Linux percpu patterns.
+    if (Name.startswith("__per_cpu") ||
+        Name.contains("percpu") ||
+        Name.contains("per_cpu"))
+        return true;
+
+    return false;
+}
     /**
          * Transfer all global variables passed as function arguments to the current clique, so
          * authentication checks will pass
@@ -2698,7 +2732,14 @@ static bool rewriteFirstTcpV6DoRcvCheckToInlineSafePtr(Function &F) {
                 }
                 continue;
             }
-
+	    /* 新增這段 */
+	    if (isPerCpuGlobal(it.first)) {
+		    if (debug_output) {
+		        errs() << "Skipping per-cpu global transfer for "
+		               << it.first->getName() << "\n";
+		    }
+		    continue;
+	    }
             Instruction *I = findUseInsertionPoint(it.first, it.second);
             assert(I);
             if (debug_output) {
