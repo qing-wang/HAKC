@@ -28,6 +28,7 @@
 #include <linux/netfilter/x_tables.h>
 #include <linux/netfilter_arp.h>
 #include <linux/netfilter_ipv4/ip_tables.h>
+#include <linux/hakc.h>
 #include <linux/netfilter_ipv6/ip6_tables.h>
 #include <linux/netfilter_arp/arp_tables.h>
 
@@ -731,7 +732,12 @@ EXPORT_SYMBOL_GPL(xt_compat_match_offset);
 void xt_compat_match_from_user(struct xt_entry_match *m, void **dstptr,
 			       unsigned int *size)
 {
-	const struct xt_match *match = m->u.kernel.match;
+	/* [HAKC] Strip any PAC/claque bits before dereferencing the match
+	 * pointer.  In the full-protection path, check_compat_entry_size_and_hooks()
+	 * signs this pointer with hakc_sign_pointer(); HAKC_GET_SAFE_PTR() recovers
+	 * the original kernel address so that function-pointer calls and
+	 * module_put() work correctly without triggering a PAC fault. */
+	const struct xt_match *match = HAKC_GET_SAFE_PTR(m->u.kernel.match);
 	struct compat_xt_entry_match *cm = (struct compat_xt_entry_match *)m;
 	int pad, off = xt_compat_match_offset(match);
 	u_int16_t msize = cm->u.user.match_size;
@@ -1114,7 +1120,9 @@ EXPORT_SYMBOL_GPL(xt_compat_target_offset);
 void xt_compat_target_from_user(struct xt_entry_target *t, void **dstptr,
 				unsigned int *size)
 {
-	const struct xt_target *target = t->u.kernel.target;
+	/* [HAKC] Same as xt_compat_match_from_user: strip PAC/claque bits
+	 * before dereferencing the target pointer. */
+	const struct xt_target *target = HAKC_GET_SAFE_PTR(t->u.kernel.target);
 	struct compat_xt_entry_target *ct = (struct compat_xt_entry_target *)t;
 	int pad, off = xt_compat_target_offset(target);
 	u_int16_t tsize = ct->u.user.target_size;

@@ -41,7 +41,7 @@ volatile bool mte_global_debug = false;
 
 EXPORT_SYMBOL(mte_global_debug);
 
-#if IS_ENABLED(CONFIG_PAC_MTE_EVAL_CODEGEN) &&                                 \
+#if /*IS_ENABLED(CONFIG_PAC_MTE_EVAL_CODEGEN)*/1 &&  \
 	!IS_ENABLED(PAC_MTE_MTE_MEMORY_BARRIER)
 int tag_clobber_memory[4];
 #endif
@@ -52,12 +52,7 @@ static inline bool is_userspace_addr(const void *addr)
 	return ((UL(1) << VA_BITS) > (unsigned long)addr);
 }
 
-static inline bool addr_is_signed(const void *ptr)
-{
-	unsigned long p = (unsigned long)ptr;
-	unsigned int upper_bits = (p >> HAKC_ADDRESS_BITS);
-	return (upper_bits > 0 && upper_bits != 0xFFFF);
-}
+/* addr_is_signed() is defined as a static inline in <linux/hakc.h>. */
 
 static inline bool get_percpu_info(struct percpu_info *info)
 {

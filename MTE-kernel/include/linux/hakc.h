@@ -182,6 +182,18 @@ static inline void *hakc_safe_ptr2(unsigned long addr)
 	}
 }
 
+/* Return true if ptr carries a HAKC PAC/claque tag (i.e. it was produced by
+ * hakc_sign_pointer).  Raw kernel addresses have bits[63:48] == 0xFFFF, which
+ * this function rejects.  Used to gate compat_release_entry() so that an
+ * attacker's raw 0xffff... pointer is simply skipped rather than passed to
+ * check_hakc_data_access(). */
+static inline bool addr_is_signed(const void *ptr)
+{
+	unsigned long p = (unsigned long)ptr;
+	unsigned int upper_bits = (p >> HAKC_ADDRESS_BITS);
+	return (upper_bits > 0 && upper_bits != 0xFFFF);
+}
+
 static inline void *hakc_safe_ptr(unsigned long addr)
 {
 	if (!addr) {

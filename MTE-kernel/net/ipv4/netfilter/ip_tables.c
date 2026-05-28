@@ -1299,6 +1299,12 @@ compat_find_calc_match(struct xt_entry_match *m,
 
 	m->u.kernel.match = match;
 	*size += xt_compat_match_offset(match);
+	/* [HAKC] Sign the stored match pointer so that compat_release_entry()
+	 * (which calls check_hakc_data_access) can authenticate it on cleanup.
+	 * In the attack path xt_ematch_foreach is empty (target_offset < 112)
+	 * so this code is never reached and no signing occurs. */
+	m->u.kernel.match = (struct xt_match *)
+		hakc_sign_pointer(match, __claque_id, __color, false);
 	return 0;
 }
 
@@ -1309,26 +1315,28 @@ static void compat_release_entry(struct compat_ipt_entry *e)
 	struct xt_match *m;
 	struct xt_target *tgt;
 
-	/* Cleanup all matches.
-	 *
-	 * [HAKC] check_hakc_data_access() verifies the match pointer before
-	 * use.  For legitimate (unsigned) kernel pointers the check is a
-	 * no-op and returns the same address.  For a forged pointer whose
-	 * upper byte encodes a valid HAKC claque ID (as produced by a
-	 * CVE-2016-4997 PoC with a HAKC-claque-encoded bad address),
-	 * PAC authentication fails in enforce mode (ALLOW_FAILED=n) and
-	 * the returned pointer is poisoned — making the fault originate
-	 * within HAKC rather than at the bare module_put() dereference,
-	 * which is detectable in the kernel stack trace.
-	 */
+	/* [HAKC] In the full-protection path, only process pointers that were
+	 * signed by compat_find_calc_match() / check_compat_entry_size_and_hooks().
+	 * An attacker's raw 0xffff... pointer has upper bits = 0xFFFF, which
+	 * addr_is_signed() rejects (it returns false for non-PAC-tagged addresses),
+	 * so we skip it entirely — no module_put() on a bad address. */
 	xt_ematch_foreach(ematch, e) {
-		m = check_hakc_data_access(ematch->u.kernel.match, __acl_tok);
+		if (!addr_is_signed(ematch->u.kernel.match))
+			continue;
+		m = (struct xt_match *)
+			check_hakc_data_access(ematch->u.kernel.match, __acl_tok);
 		module_put(m->me);
 	}
 	t = compat_ipt_get_target(e);
-	/* [HAKC] Same protection for the target pointer. */
-	tgt = check_hakc_data_access(t->u.kernel.target, __acl_tok);
-	module_put(tgt->me);
+	/* [HAKC] Same gate for the target pointer: skip if unsigned.
+	 * In the attack case t->u.kernel.target is either 0xffff... (original
+	 * bug) or an attacker-controlled value — neither will pass addr_is_signed()
+	 * because they were never signed by hakc_sign_pointer(). */
+	if (addr_is_signed(t->u.kernel.target)) {
+		tgt = (struct xt_target *)
+			check_hakc_data_access(t->u.kernel.target, __acl_tok);
+		module_put(tgt->me);
+	}
 }
 
 static int
@@ -1382,6 +1390,17 @@ check_compat_entry_size_and_hooks(struct compat_ipt_entry *e,
 		goto release_matches;
 	}
 	t->u.kernel.target = target;
+	/* [HAKC] Sign the target pointer for the same reason as match pointers
+	 * in compat_find_calc_match(): compat_release_entry() will authenticate
+	 * it via check_hakc_data_access().
+	 *
+	 * Side-effect in the attack case: the signed pointer (8 bytes at e+82)
+	 * overwrites e->target_offset (at e+88) with 0x02<pac_byte> instead of
+	 * 0xffff.  This is still a corrupted value, but the addr_is_signed()
+	 * gate in compat_release_entry() will skip any unsigned pointer found
+	 * there, so no module_put() on a bad address occurs either way. */
+	t->u.kernel.target = (struct xt_target *)
+		hakc_sign_pointer(target, __claque_id, __color, false);
 
 	off += xt_compat_target_offset(target);
 	*size += off;
@@ -1392,12 +1411,17 @@ check_compat_entry_size_and_hooks(struct compat_ipt_entry *e,
 	return 0;
 
 out:
-	module_put(t->u.kernel.target->me);
+	/* [HAKC] Target pointer is now signed; use check_hakc_data_access()
+	 * to strip the PAC/claque before calling module_put(). */
+	module_put(((struct xt_target *)
+		check_hakc_data_access(t->u.kernel.target, __acl_tok))->me);
 release_matches:
 	xt_ematch_foreach(ematch, e) {
 		if (j-- == 0)
 			break;
-		module_put(ematch->u.kernel.match->me);
+		/* [HAKC] Same for match pointers signed in compat_find_calc_match(). */
+		module_put(((struct xt_match *)
+			check_hakc_data_access(ematch->u.kernel.match, __acl_tok))->me);
 	}
 	return ret;
 }
