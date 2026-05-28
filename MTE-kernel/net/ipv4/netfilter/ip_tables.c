@@ -1299,12 +1299,25 @@ compat_find_calc_match(struct xt_entry_match *m,
 
 	m->u.kernel.match = match;
 	*size += xt_compat_match_offset(match);
-	/* [HAKC] Sign the stored match pointer so that compat_release_entry()
-	 * (which calls check_hakc_data_access) can authenticate it on cleanup.
+	/* [HAKC] Transfer ownership of the match object to ip_tables' compartment.
+	 * We use hakc_sign_pointer_with_color() rather than hakc_transfer_to_clique()
+	 * because xt_match objects are shared kernel objects that may already have
+	 * been colored by x_tables or another subsystem.  hakc_transfer_to_clique()
+	 * refuses to re-color already-colored (non-SILVER) memory and returns the
+	 * pointer unsigned — leaving target_offset uncorrupted at 0xFFFF and breaking
+	 * all downstream protection.
+	 *
+	 * hakc_sign_pointer_with_color() reads the ACTUAL MTE tag at the address
+	 * (whatever color the object currently carries) and uses it for PAC signing.
+	 * check_hakc_data_access() also reads the actual MTE tag at verify time, so
+	 * sign-color == verify-color → autia succeeds for legitimate pointers and
+	 * fails for forged ones.
+	 *
 	 * In the attack path xt_ematch_foreach is empty (target_offset < 112)
-	 * so this code is never reached and no signing occurs. */
+	 * so this code is never reached and the fake match pointer is unsigned.
+	 * addr_is_signed() in compat_release_entry() detects this and skips it. */
 	m->u.kernel.match = (struct xt_match *)
-		hakc_sign_pointer(match, __claque_id, __color, false);
+		hakc_sign_pointer_with_color(match, __claque_id, false);
 	return 0;
 }
 
@@ -1315,11 +1328,21 @@ static void compat_release_entry(struct compat_ipt_entry *e)
 	struct xt_match *m;
 	struct xt_target *tgt;
 
-	/* [HAKC] In the full-protection path, only process pointers that were
-	 * signed by compat_find_calc_match() / check_compat_entry_size_and_hooks().
-	 * An attacker's raw 0xffff... pointer has upper bits = 0xFFFF, which
-	 * addr_is_signed() rejects (it returns false for non-PAC-tagged addresses),
-	 * so we skip it entirely — no module_put() on a bad address. */
+	/* [HAKC] Only process pointers that were signed into ip_tables'
+	 * compartment by compat_find_calc_match() /
+	 * check_compat_entry_size_and_hooks() via hakc_sign_pointer_with_color().
+	 * A signed pointer has PAC+claque bits in bits[63:48] and is
+	 * detected by addr_is_signed().
+	 *
+	 * An attacker's raw 0xffff... pointer is never signed (the attack
+	 * path bypasses compat_find_calc_match entirely), so addr_is_signed()
+	 * returns false and we skip module_put() — no dereference of a bad address.
+	 *
+	 * For signed pointers, check_hakc_data_access() reads the actual
+	 * MTE tag (which matches the sign-time color used by
+	 * hakc_sign_pointer_with_color) and authenticates with autia.
+	 * A forged pointer whose PAC was not produced with the hardware key
+	 * causes autia to fail. */
 	xt_ematch_foreach(ematch, e) {
 		if (!addr_is_signed(ematch->u.kernel.match))
 			continue;
@@ -1331,12 +1354,15 @@ static void compat_release_entry(struct compat_ipt_entry *e)
 	/* [HAKC] Same gate for the target pointer: skip if unsigned.
 	 * In the attack case t->u.kernel.target is either 0xffff... (original
 	 * bug) or an attacker-controlled value — neither will pass addr_is_signed()
-	 * because they were never signed by hakc_sign_pointer(). */
+	 * because they were never transferred via hakc_transfer_to_clique(). */
 	if (addr_is_signed(t->u.kernel.target)) {
 		tgt = (struct xt_target *)
 			check_hakc_data_access(t->u.kernel.target, __acl_tok);
 		module_put(tgt->me);
 	}
+	/* If target pointer is unsigned (attack case or pre-signing error path),
+	 * skip module_put() entirely — the object was never transferred into our
+	 * compartment, so there is nothing to release. */
 }
 
 static int
@@ -1390,9 +1416,12 @@ check_compat_entry_size_and_hooks(struct compat_ipt_entry *e,
 		goto release_matches;
 	}
 	t->u.kernel.target = target;
-	/* [HAKC] Sign the target pointer for the same reason as match pointers
-	 * in compat_find_calc_match(): compat_release_entry() will authenticate
-	 * it via check_hakc_data_access().
+	/* [HAKC] Same rationale as compat_find_calc_match(): use
+	 * hakc_sign_pointer_with_color() so the sign-time MTE color matches
+	 * what check_hakc_data_access() reads at verify time, regardless of
+	 * whether the object has already been colored by another subsystem.
+	 * hakc_transfer_to_clique() would return the pointer unsigned for
+	 * non-SILVER objects, breaking the protection.
 	 *
 	 * Side-effect in the attack case: the signed pointer (8 bytes at e+82)
 	 * overwrites e->target_offset (at e+88) with 0x02<pac_byte> instead of
@@ -1400,7 +1429,7 @@ check_compat_entry_size_and_hooks(struct compat_ipt_entry *e,
 	 * gate in compat_release_entry() will skip any unsigned pointer found
 	 * there, so no module_put() on a bad address occurs either way. */
 	t->u.kernel.target = (struct xt_target *)
-		hakc_sign_pointer(target, __claque_id, __color, false);
+		hakc_sign_pointer_with_color(target, __claque_id, false);
 
 	off += xt_compat_target_offset(target);
 	*size += off;
@@ -1411,15 +1440,15 @@ check_compat_entry_size_and_hooks(struct compat_ipt_entry *e,
 	return 0;
 
 out:
-	/* [HAKC] Target pointer is now signed; use check_hakc_data_access()
-	 * to strip the PAC/claque before calling module_put(). */
+	/* [HAKC] Target was signed with hakc_sign_pointer_with_color(); the sign-time
+	 * color == actual MTE color, so autia in check_hakc_data_access() succeeds. */
 	module_put(((struct xt_target *)
 		check_hakc_data_access(t->u.kernel.target, __acl_tok))->me);
 release_matches:
 	xt_ematch_foreach(ematch, e) {
 		if (j-- == 0)
 			break;
-		/* [HAKC] Same for match pointers signed in compat_find_calc_match(). */
+		/* [HAKC] Same: match pointers signed with hakc_sign_pointer_with_color(). */
 		module_put(((struct xt_match *)
 			check_hakc_data_access(ematch->u.kernel.match, __acl_tok))->me);
 	}
