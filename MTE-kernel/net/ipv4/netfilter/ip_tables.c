@@ -27,11 +27,45 @@
 #include <linux/netfilter_ipv4/ip_tables.h>
 #include <net/netfilter/nf_log.h>
 #include "../../netfilter/xt_repldata.h"
+#include <linux/hakc.h>
+
+/*
+ * [BUG REINTRODUCED] Extra setsockopt command that calls compat_do_replace()
+ * unconditionally (no in_compat_syscall() guard), allowing a native 64-bit
+ * process to trigger the compat path.  This is needed for poc_cysec.c because
+ * no 32-bit ARM cross-compiler is available; it is NOT part of the original
+ * CVE-2016-4997 bug — it only widens the trigger surface for test purposes.
+ */
+#define IPT_SO_SET_REPLACE_COMPAT (IPT_BASE_CTL + 2)  /* = 66 */
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Netfilter Core Team <coreteam@netfilter.org>");
 MODULE_DESCRIPTION("IPv4 packet filter");
 MODULE_ALIAS("ipt_icmp");
+
+/*
+ * [HAKC] Declare ip_tables as claque 2 (RED_CLIQUE), same compartment as
+ * other net/ipv4 code.  SILVER_CLIQUE and GREEN_CLIQUE are added as allowed
+ * extra colors so that legitimate (non-HAKC-signed) kernel pointers — which
+ * mte_get_mem_tag() returns as SILVER (0xf0) — pass through without DENY in
+ * normal operation.
+ *
+ * The protection this provides: if an attacker supplies a fake xt_match/
+ * xt_target pointer whose upper bits encode a valid HAKC claque ID (1–254),
+ * check_hakc_data_access() will attempt PAC authentication on that pointer.
+ * Because the attacker cannot forge a valid pacia signature, authentication
+ * fails and the pointer is poisoned, making the attack detectable in the
+ * kernel stack trace and (with ALLOW_FAILED=n) caught before module_put().
+ *
+ * NOTE: Pointers with claque=0xFF (raw 0xffff... kernel addresses, the
+ * default for un-annotated kernel objects) are treated as unsigned and pass
+ * through HAKC checks unchanged — this is by design in the HAKC framework.
+ * Full prevention requires annotating x_tables.c so that xt_match/xt_target
+ * objects are themselves HAKC-colored, making their claque valid and thus
+ * detectable.
+ */
+HAKC_MODULE_CLAQUE(2, RED_CLIQUE,
+		   HAKC_MASK_COLOR(SILVER_CLIQUE) | HAKC_MASK_COLOR(GREEN_CLIQUE));
 
 void *ipt_alloc_initial_table(const struct xt_table *info)
 {
@@ -1272,12 +1306,29 @@ static void compat_release_entry(struct compat_ipt_entry *e)
 {
 	struct xt_entry_target *t;
 	struct xt_entry_match *ematch;
+	struct xt_match *m;
+	struct xt_target *tgt;
 
-	/* Cleanup all matches */
-	xt_ematch_foreach(ematch, e)
-		module_put(ematch->u.kernel.match->me);
+	/* Cleanup all matches.
+	 *
+	 * [HAKC] check_hakc_data_access() verifies the match pointer before
+	 * use.  For legitimate (unsigned) kernel pointers the check is a
+	 * no-op and returns the same address.  For a forged pointer whose
+	 * upper byte encodes a valid HAKC claque ID (as produced by a
+	 * CVE-2016-4997 PoC with a HAKC-claque-encoded bad address),
+	 * PAC authentication fails in enforce mode (ALLOW_FAILED=n) and
+	 * the returned pointer is poisoned — making the fault originate
+	 * within HAKC rather than at the bare module_put() dereference,
+	 * which is detectable in the kernel stack trace.
+	 */
+	xt_ematch_foreach(ematch, e) {
+		m = check_hakc_data_access(ematch->u.kernel.match, __acl_tok);
+		module_put(m->me);
+	}
 	t = compat_ipt_get_target(e);
-	module_put(t->u.kernel.target->me);
+	/* [HAKC] Same protection for the target pointer. */
+	tgt = check_hakc_data_access(t->u.kernel.target, __acl_tok);
+	module_put(tgt->me);
 }
 
 static int
@@ -1296,20 +1347,22 @@ check_compat_entry_size_and_hooks(struct compat_ipt_entry *e,
 
 	if ((unsigned long)e % __alignof__(struct compat_ipt_entry) != 0 ||
 	    (unsigned char *)e + sizeof(struct compat_ipt_entry) >= limit ||
-	    (unsigned char *)e + e->next_offset > limit)
+	    (unsigned char *)e + e->next_offset > limit) {
 		return -EINVAL;
+	}
 
 	if (e->next_offset < sizeof(struct compat_ipt_entry) +
-			     sizeof(struct compat_xt_entry_target))
+			     sizeof(struct compat_xt_entry_target)) {
 		return -EINVAL;
+	}
 
 	if (!ip_checkentry(&e->ip))
 		return -EINVAL;
 
-	ret = xt_compat_check_entry_offsets(e, e->elems,
-					    e->target_offset, e->next_offset);
-	if (ret)
-		return ret;
+	/* [BUG REINTRODUCED] xt_compat_check_entry_offsets() was added in
+	 * commit 9b4fce7a ("netfilter: x_tables: fix compat …", v4.6).
+	 * Removing it here restores the pre-4.6 state that allows
+	 * target_offset to point into the ipt_ip header (CVE-2016-4997). */
 
 	off = sizeof(struct ipt_entry) - sizeof(struct compat_ipt_entry);
 	entry_offset = (void *)e - (void *)base;
@@ -1631,6 +1684,15 @@ do_ipt_set_ctl(struct sock *sk, int cmd, sockptr_t arg, unsigned int len)
 		ret = do_add_counters(sock_net(sk), arg, len);
 		break;
 
+#ifdef CONFIG_COMPAT
+	case IPT_SO_SET_REPLACE_COMPAT:
+		/* [NOT a pre-4.6 bug] Allow native 64-bit process to call
+		 * compat_do_replace() directly, bypassing in_compat_syscall().
+		 * Only needed because poc_cysec.c is a 64-bit binary. */
+		ret = compat_do_replace(sock_net(sk), arg, len);
+		break;
+#endif
+
 	default:
 		ret = -EINVAL;
 	}
@@ -1844,7 +1906,7 @@ static struct xt_target ipt_builtin_tg[] __read_mostly = {
 static struct nf_sockopt_ops ipt_sockopts = {
 	.pf		= PF_INET,
 	.set_optmin	= IPT_BASE_CTL,
-	.set_optmax	= IPT_SO_SET_MAX+1,
+	.set_optmax	= IPT_SO_SET_REPLACE_COMPAT + 1,
 	.set		= do_ipt_set_ctl,
 	.get_optmin	= IPT_BASE_CTL,
 	.get_optmax	= IPT_SO_GET_MAX+1,
