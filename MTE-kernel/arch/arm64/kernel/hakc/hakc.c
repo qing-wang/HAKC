@@ -514,6 +514,24 @@ static void * noinline check_hakc_access(
 					(u64)address, get_hakc_color_name(addr_color),
 					addr_claque, (u64)access_tok);
 			}
+			/* [HAKC PMCPass simulation] PMCPass inserts
+			 * hakc_sign_pointer_with_color() at every pointer write
+			 * site, so every legitimate kernel pointer in a
+			 * HAKC-instrumented struct carries a PAC and has
+			 * bits[63:48] != 0xFFFF.  If we arrive here with a
+			 * canonical kernel pointer (bits[63:48] == 0xFFFF) that
+			 * is non-NULL and larger than PAGE_SIZE, the pointer was
+			 * NEVER signed — either it came from an attacker or from
+			 * uninstrumented code that wrote a raw kernel address.
+			 * Either way, deny the access. */
+			{
+				unsigned long p = (unsigned long)address;
+				if (((p >> 48) & 0xFFFF) == 0xFFFF && p > PAGE_SIZE) {
+					pr_err("HAKC: unsigned kernel pointer denied: %016lx (caller: %pS)\n",
+					       p, (void *)_RET_IP_);
+					BUG();
+				}
+			}
 			result = (unsigned long)HAKC_GET_SAFE_PTR(address);
 		}
 		HAKC_INFO("ctx_addr = %lx salt = %lx result = %lx\n",
