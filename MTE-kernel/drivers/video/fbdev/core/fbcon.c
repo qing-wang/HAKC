@@ -79,8 +79,18 @@
 #include <linux/uaccess.h>
 #include <asm/fb.h>
 #include <asm/irq.h>
+#ifdef CONFIG_ARM64_MTE
+#include <asm/mte.h>
+#include <asm/mte-def.h>
+#include <asm/sysreg.h>
+#include <asm/cpufeature.h>
+#endif
 
 #include "fbcon.h"
+
+/* MTE tag values for font buffer guard region testing */
+#define FBCON_FONT_MTE_TAG  1  /* tag for valid font data */
+#define FBCON_GUARD_MTE_TAG 2  /* tag for guard region (must differ) */
 
 #ifdef FBCONDEBUG
 #  define DPRINTK(fmt, args...) printk(KERN_DEBUG "%s: " fmt, __func__ , ## args)
@@ -2266,8 +2276,69 @@ static int fbcon_get_font(struct vc_data *vc, struct console_font *font)
 
 	if (font->width <= 8) {
 		j = vc->vc_font.height;
+#ifdef CONFIG_ARM64_MTE
+		/*
+		 * Enable EL1 synchronous MTE tag checking around the font copy.
+		 * If the font buffer has an MTE guard region, an out-of-bounds
+		 * read will cause a synchronous EL1 tag-mismatch fault here.
+		 *
+		 * NOTE: the size check below is intentionally removed so that
+		 * the OOB access is not silently suppressed — the MTE guard is
+		 * the intended detection mechanism.
+		 */
+		if (system_supports_mte()) {
+			u64 sctlr_before = read_sysreg(sctlr_el1);
+			u64 gcr_before = read_sysreg_s(SYS_GCR_EL1);
+			u8 mem_tag = mte_get_mem_tag(fontdata);
+			u8 guard_tag = mte_get_mem_tag(fontdata + 256);
+			pr_info("fbcon MTE: get_font h=%d cc=%d fontdata=%px\n",
+				j, font->charcount, fontdata);
+			pr_info("fbcon MTE: sctlr=%016llx gcr_el1=%016llx font_tag=0x%x guard_tag=0x%x\n",
+				sctlr_before, gcr_before, mem_tag, guard_tag);
+
+			/*
+			 * GCR_EL1.EXCL excludes tags from fault generation.
+			 * Clear EXCL bits for our logical tags (1=font, 2=guard)
+			 * so that a pointer-tag/mem-tag mismatch actually faults.
+			 */
+			u64 our_tags_incl = BIT(FBCON_FONT_MTE_TAG) | BIT(FBCON_GUARD_MTE_TAG);
+			u64 gcr_new = (gcr_before & ~SYS_GCR_EL1_EXCL_MASK) |
+				      (~our_tags_incl & SYS_GCR_EL1_EXCL_MASK);
+			write_sysreg_s(gcr_new, SYS_GCR_EL1);
+
+			/* Enable EL1 synchronous tag check faults */
+			sysreg_clear_set(sctlr_el1, SCTLR_ELx_TCF_MASK,
+					 SCTLR_ELx_TCF_SYNC);
+
+			/*
+			 * CONFIG_PAC_MTE_EVAL_CODEGEN causes entry.S to replace
+			 * SET_PSTATE_TCO(0) with nop, so PSTATE.TCO stays 1 in
+			 * kernel mode (suppressing all EL1 tag check faults).
+			 * Explicitly clear TCO here to allow tag checking.
+			 */
+			asm volatile(SET_PSTATE_TCO(0) ::: "memory");
+			isb();
+
+			pr_info("fbcon MTE: gcr=%016llx sctlr=%016llx (TCO cleared)\n",
+				read_sysreg_s(SYS_GCR_EL1), read_sysreg(sctlr_el1));
+			pr_info("fbcon MTE: probing guard at fontdata+256 (EXPECT EL1 MTE FAULT)...\n");
+			barrier();
+			/* pointer tag=0xF1, mem tag=0xF2 → MUST fault */
+			volatile u8 probe = ((const u8 *)fontdata)[256];
+			pr_info("fbcon MTE: guard probe=%u - EL1 MTE STILL NOT firing!\n",
+				(unsigned)probe);
+
+			/* Restore PSTATE.TCO, GCR_EL1 and TCF */
+			asm volatile(SET_PSTATE_TCO(1) ::: "memory");
+			write_sysreg_s(gcr_before, SYS_GCR_EL1);
+			sysreg_clear_set(sctlr_el1, SCTLR_ELx_TCF_MASK,
+					 SCTLR_ELx_TCF_NONE);
+			isb();
+		}
+#else
 		if (font->charcount * j > FNTSIZE(fontdata))
 			return -EINVAL;
+#endif
 
 		for (i = 0; i < font->charcount; i++) {
 			memcpy(data, fontdata, j);
@@ -2275,6 +2346,7 @@ static int fbcon_get_font(struct vc_data *vc, struct console_font *font)
 			data += 32;
 			fontdata += j;
 		}
+
 	} else if (font->width <= 16) {
 		j = vc->vc_font.height * 2;
 		if (font->charcount * j > FNTSIZE(fontdata))
@@ -2472,13 +2544,40 @@ static int fbcon_set_font(struct vc_data *vc, struct console_font *font,
 
 	size = CALC_FONTSZ(h, pitch, charcount);
 
+#ifdef CONFIG_ARM64_MTE
+	/*
+	 * Allocate an extra MTE_GRANULE_SIZE bytes after the font data for a
+	 * guard region.  The guard is tagged with a different MTE tag so that
+	 * an out-of-bounds read in fbcon_get_font() triggers an EL1 MTE fault.
+	 */
+	new_data = kmalloc(FONT_EXTRA_WORDS * sizeof(int) + size +
+			   MTE_GRANULE_SIZE, GFP_USER);
+#else
 	new_data = kmalloc(FONT_EXTRA_WORDS * sizeof(int) + size, GFP_USER);
+#endif
 
 	if (!new_data)
 		return -ENOMEM;
 
 	new_data += FONT_EXTRA_WORDS * sizeof(int);
 	FNTSIZE(new_data) = size;
+
+#ifdef CONFIG_ARM64_MTE
+	if (system_supports_mte()) {
+		size_t aligned_size = round_up(size, MTE_GRANULE_SIZE);
+
+		/* Tag font data region and get a tagged pointer back */
+		new_data = mte_set_mem_tag_range(new_data, aligned_size,
+						 FBCON_FONT_MTE_TAG);
+		/* Tag the guard granule immediately after with a different tag */
+		mte_set_mem_tag_range(new_data + aligned_size, MTE_GRANULE_SIZE,
+				      FBCON_GUARD_MTE_TAG);
+		pr_info("fbcon MTE: font_ptr=%px size=%zu aligned=%zu guard_tag=0x%x\n",
+			new_data, size, aligned_size, FBCON_GUARD_MTE_TAG);
+	} else {
+		pr_info("fbcon MTE: system_supports_mte() = false, no guard\n");
+	}
+#endif
 	FNTCHARCNT(new_data) = charcount;
 	REFCOUNT(new_data) = 0;	/* usage counter */
 	for (i=0; i< charcount; i++) {

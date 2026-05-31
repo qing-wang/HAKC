@@ -782,6 +782,13 @@ static int vt_resizex(struct vc_data *vc, struct vt_consize __user *cs)
 
 		if (vc) {
 			vc->vc_resize_user = 1;
+			/* Restore vulnerable behavior for MTE EL1 guard test:
+			 * set vc_font.height from v_clin without reallocating
+			 * the font buffer. fbcon_resize() will return -EINVAL
+			 * but the corrupted height is NOT rolled back, allowing
+			 * fbcon_get_font() to read out-of-bounds. */
+			if (v.v_clin)
+				vc->vc_font.height = v.v_clin;
 			vc_resize(vc, v.v_cols, v.v_rows);
 		}
 	}
