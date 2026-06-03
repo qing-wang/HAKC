@@ -35,9 +35,11 @@ MODULE_ALIAS("ipt_icmp");
 
 /*
  * [HAKC] ip_tables is compartment claque 2, RED_CLIQUE.
- * Also accepts SILVER_CLIQUE (shared objects) and GREEN_CLIQUE so that
- * legitimate (non-HAKC-signed) kernel pointers in the normal non-compat path
- * are not rejected.
+ * Accepts SILVER_CLIQUE (shared/untagged kernel objects) only.
+ * GREEN_CLIQUE is intentionally excluded: any GREEN-tagged pointer
+ * reaching check_hakc_data_access() from the compat cleanup path is
+ * an attacker-injected cross-compartment pointer (CVE-2016-4997 attack)
+ * and must be denied in ENFORCE mode.
  */
 #include <linux/hakc.h>
 HAKC_MODULE_CLAQUE(2, RED_CLIQUE,
@@ -1295,11 +1297,11 @@ static void compat_release_entry(struct compat_ipt_entry *e)
 
 	/* Cleanup all matches.
 	 * [HAKC PMCPass simulation] check_hakc_data_access() gates the
-	 * pointer dereference: if ematch->u.kernel.match belongs to a
-	 * compartment whose color is not in __acl_tok (i.e. it is attacker-
-	 * supplied data from the wrong compartment), the access is denied
-	 * in ENFORCE mode, preventing the data-only integer-decrement attack
-	 * described in CVE-2016-4997 and the HAKC paper (NDSS 2022 §I). */
+	 * pointer dereference.  The attacker's fake match pointer carries a
+	 * HAKC-format address (bits[63:56] = paper_helper claque = 5) and a
+	 * GREEN MTE allocation tag.  ip_tables' access_tok does not include
+	 * GREEN_CLIQUE, so obtain_cert & access_tok = 0 (salt=0) and
+	 * VALID_CLAQUE(5) is true → BUG() fires in ENFORCE mode. */
 	xt_ematch_foreach(ematch, e)
 		module_put(((struct xt_match *)
 			check_hakc_data_access(ematch->u.kernel.match,
