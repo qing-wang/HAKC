@@ -40,10 +40,16 @@ MODULE_ALIAS("ipt_icmp");
  * reaching check_hakc_data_access() from the compat cleanup path is
  * an attacker-injected cross-compartment pointer (CVE-2016-4997 attack)
  * and must be denied in ENFORCE mode.
+ *
+ * Defence math:
+ *   obtain_cert = create_pac_context(claque=5, GREEN) = (5<<16)|2 = 0x00050002
+ *   access_tok  = HAKC_CONTEXT(2, SILVER)             = (2<<16)|1 = 0x00020001
+ *   salt        = obtain_cert & access_tok = 0
+ *   VALID_CLAQUE(5)=true  &&  !salt=true  →  BUG()
  */
 #include <linux/hakc.h>
 HAKC_MODULE_CLAQUE(2, RED_CLIQUE,
-		   HAKC_MASK_COLOR(SILVER_CLIQUE) | HAKC_MASK_COLOR(GREEN_CLIQUE));
+		   HAKC_MASK_COLOR(SILVER_CLIQUE));
 HAKC_EXIT(HAKC_ENTRY_TOKEN(0, HAKC_MASK_COLOR(SILVER_CLIQUE)),
 	  HAKC_ENTRY_TOKEN(1, HAKC_MASK_COLOR(SILVER_CLIQUE)));
 
