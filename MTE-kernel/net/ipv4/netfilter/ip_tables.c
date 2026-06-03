@@ -33,6 +33,26 @@ MODULE_AUTHOR("Netfilter Core Team <coreteam@netfilter.org>");
 MODULE_DESCRIPTION("IPv4 packet filter");
 MODULE_ALIAS("ipt_icmp");
 
+/*
+ * [HAKC] ip_tables is compartment claque 2, RED_CLIQUE.
+ * Also accepts SILVER_CLIQUE (shared objects) and GREEN_CLIQUE so that
+ * legitimate (non-HAKC-signed) kernel pointers in the normal non-compat path
+ * are not rejected.
+ */
+#include <linux/hakc.h>
+HAKC_MODULE_CLAQUE(2, RED_CLIQUE,
+		   HAKC_MASK_COLOR(SILVER_CLIQUE) | HAKC_MASK_COLOR(GREEN_CLIQUE));
+HAKC_EXIT(HAKC_ENTRY_TOKEN(0, HAKC_MASK_COLOR(SILVER_CLIQUE)),
+	  HAKC_ENTRY_TOKEN(1, HAKC_MASK_COLOR(SILVER_CLIQUE)));
+
+/*
+ * [BUG REINTRODUCED] Extra setsockopt command that calls compat_do_replace()
+ * unconditionally (no in_compat_syscall() guard), allowing a native 64-bit
+ * process to exercise the compat path.  Needed because no 32-bit toolchain
+ * is available in this environment.  cmd = IPT_BASE_CTL + 2 = 66.
+ */
+#define IPT_SO_SET_REPLACE_COMPAT  (IPT_BASE_CTL + 2)
+
 void *ipt_alloc_initial_table(const struct xt_table *info)
 {
 	return xt_alloc_initial_table(ipt, IPT);
@@ -1273,11 +1293,21 @@ static void compat_release_entry(struct compat_ipt_entry *e)
 	struct xt_entry_target *t;
 	struct xt_entry_match *ematch;
 
-	/* Cleanup all matches */
+	/* Cleanup all matches.
+	 * [HAKC PMCPass simulation] check_hakc_data_access() gates the
+	 * pointer dereference: if ematch->u.kernel.match belongs to a
+	 * compartment whose color is not in __acl_tok (i.e. it is attacker-
+	 * supplied data from the wrong compartment), the access is denied
+	 * in ENFORCE mode, preventing the data-only integer-decrement attack
+	 * described in CVE-2016-4997 and the HAKC paper (NDSS 2022 §I). */
 	xt_ematch_foreach(ematch, e)
-		module_put(ematch->u.kernel.match->me);
+		module_put(((struct xt_match *)
+			check_hakc_data_access(ematch->u.kernel.match,
+					       __acl_tok))->me);
 	t = compat_ipt_get_target(e);
-	module_put(t->u.kernel.target->me);
+	module_put(((struct xt_target *)
+		check_hakc_data_access(t->u.kernel.target,
+				       __acl_tok))->me);
 }
 
 static int
@@ -1306,10 +1336,12 @@ check_compat_entry_size_and_hooks(struct compat_ipt_entry *e,
 	if (!ip_checkentry(&e->ip))
 		return -EINVAL;
 
-	ret = xt_compat_check_entry_offsets(e, e->elems,
-					    e->target_offset, e->next_offset);
-	if (ret)
-		return ret;
+	/* [BUG REINTRODUCED] xt_compat_check_entry_offsets() was added in
+	 * Linux 4.6 as the fix for CVE-2016-4997.  It performs a lower-bound
+	 * check ensuring target_offset >= sizeof(compat_ipt_entry), preventing
+	 * compat_ipt_get_target() from returning a pointer inside the ipt_ip
+	 * header.  We omit the call here to reintroduce the vulnerability and
+	 * let the paper's data-only attack path run. */
 
 	off = sizeof(struct ipt_entry) - sizeof(struct compat_ipt_entry);
 	entry_offset = (void *)e - (void *)base;
@@ -1631,6 +1663,14 @@ do_ipt_set_ctl(struct sock *sk, int cmd, sockptr_t arg, unsigned int len)
 		ret = do_add_counters(sock_net(sk), arg, len);
 		break;
 
+	case IPT_SO_SET_REPLACE_COMPAT:
+		/* [BUG REINTRODUCED] Call compat_do_replace() directly,
+		 * bypassing in_compat_syscall() so a native 64-bit process
+		 * can trigger the compat path.  This is needed to exercise
+		 * CVE-2016-4997 without a 32-bit toolchain. */
+		ret = compat_do_replace(sock_net(sk), arg, len);
+		break;
+
 	default:
 		ret = -EINVAL;
 	}
@@ -1844,7 +1884,7 @@ static struct xt_target ipt_builtin_tg[] __read_mostly = {
 static struct nf_sockopt_ops ipt_sockopts = {
 	.pf		= PF_INET,
 	.set_optmin	= IPT_BASE_CTL,
-	.set_optmax	= IPT_SO_SET_MAX+1,
+	.set_optmax	= IPT_SO_SET_REPLACE_COMPAT + 1,
 	.set		= do_ipt_set_ctl,
 	.get_optmin	= IPT_BASE_CTL,
 	.get_optmax	= IPT_SO_GET_MAX+1,

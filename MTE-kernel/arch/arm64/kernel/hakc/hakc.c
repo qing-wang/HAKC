@@ -513,11 +513,26 @@ static void * noinline check_hakc_access(
 			result |= (0x0000FFFFFFFFFFFF & (unsigned long)ctx_addr);
 		} else {
 			if (VALID_CLAQUE(addr_claque) && !salt) {
-				pr_warn_ratelimited(
-					"HAKC ENFORCE DENY: address=%016lx color=%s "
-					"claque=%lu access_tok=%016lx\n",
-					(u64)address, get_hakc_color_name(addr_color),
-					addr_claque, (u64)access_tok);
+				/* [HAKC compartment enforcement] The pointer
+				 * belongs to a valid claque but its color does
+				 * not match the caller's access token — this is
+				 * exactly the cross-compartment access that
+				 * HAKC is designed to block.  In ENFORCE mode
+				 * this is a hard denial: the pointer came from
+				 * a different compartment (e.g. an attacker
+				 * supplying a GREEN_CLIQUE object to an
+				 * ip_tables RED_CLIQUE check path).
+				 * This is the defense against the data-only
+				 * attack described in CVE-2016-4997 / HAKC
+				 * paper §I. */
+				pr_err("HAKC ENFORCE DENY (color mismatch): "
+				       "address=%016lx color=%s claque=%lu "
+				       "access_tok=%016lx (caller: %pS)\n",
+				       (u64)address,
+				       get_hakc_color_name(addr_color),
+				       addr_claque, (u64)access_tok,
+				       (void *)_RET_IP_);
+				BUG();
 			}
 			result = (unsigned long)HAKC_GET_SAFE_PTR(address);
 		}
